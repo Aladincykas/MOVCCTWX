@@ -545,6 +545,33 @@ function M.run(mon, speakers, config, frame, startSongName)
             end
         end)
 
+        -- Remote commands from the pocket computer (relayed as
+        -- "movcctwx_remote_action" by remote.lua, already allowlist-checked
+        -- before it's ever queued) -- same action names and the same
+        -- state/adjustVolume the on-screen buttons use, so a remote
+        -- playpause/stop/volume command works identically to tapping the
+        -- button, in either compact or immersive mode (playPauseBtn is nil
+        -- while immersive -- guarded below, same as the status-tick loop
+        -- does for it already).
+        safeSchedule(function()
+            while not state.stopRequested do
+                local _, action = os.pullEvent("movcctwx_remote_action")
+                if action == "playpause" then
+                    state.paused = not state.paused
+                    if playPauseBtn then playPauseBtn:setText(state.paused and "Play" or "Pause") end
+                    os.queueEvent("music_control")
+                elseif action == "stop" then
+                    playReason = "stopped"
+                    state.stopRequested = true
+                    os.queueEvent("music_control")
+                elseif action == "vol-1" then adjustVolume(-0.01)
+                elseif action == "vol+1" then adjustVolume(0.01)
+                elseif action == "vol-10" then adjustVolume(-0.10)
+                elseif action == "vol+10" then adjustVolume(0.10)
+                end
+            end
+        end)
+
         safeSchedule(function()
             local response, err = http.get(song.url, nil, true)
             if not response then
