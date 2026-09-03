@@ -210,6 +210,7 @@ function M.play(wall, screen, speakers, entry, config)
         if not hasSeparateAudio then return end
         local dfpwm = require("cc.audio.dfpwm")
         local bytesQueued = 0
+        local audioStartMs = nil
         for _, url in ipairs(entry.audio) do
             if state.stopRequested then break end
             local response = http.get(url, nil, true)
@@ -235,12 +236,24 @@ function M.play(wall, screen, speakers, entry, config)
                 end
                 if #funcs > 0 then parallel.waitForAll(table.unpack(funcs)) end
                 bytesQueued = bytesQueued + #data
-                -- playAudio returns once the block is QUEUED, not once it has
-                -- been heard, so what is already audible trails bytesQueued by
-                -- roughly the block still in the speaker's buffer. Subtracting
-                -- one block keeps video a touch behind the sound rather than
-                -- ahead of it, which reads far better than the reverse.
-                audioElapsedSec = math.max(0, (bytesQueued - 16 * 1024) / DFPWM_BYTES_PER_SECOND)
+                if audioStartMs == nil then audioStartMs = os.epoch("utc") end
+                -- Position is the WALL CLOCK since playback began, not the
+                -- byte count -- audio plays at exactly real time, so once it
+                -- has started the clock is the truth.
+                --
+                -- Counting queued bytes overestimates instead: playAudio
+                -- returns as soon as a block is accepted, not when it has been
+                -- heard, and the speaker accepts several blocks before it
+                -- reports full. Measured in-game, that put this clock 2.5s
+                -- ahead of the sound -- and since video paces to it, every
+                -- frame looked 2.5s late and got dropped trying to catch up to
+                -- a time that had not happened yet.
+                --
+                -- Still clamped to what has actually been queued, so a stall
+                -- in fetching cannot let the clock run past real audio.
+                local byBytes = bytesQueued / DFPWM_BYTES_PER_SECOND
+                local byClock = (os.epoch("utc") - audioStartMs - pausedMs) / 1000
+                audioElapsedSec = math.max(0, math.min(byClock, byBytes))
             end
             response.close()
         end
