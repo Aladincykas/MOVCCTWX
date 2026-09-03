@@ -72,6 +72,11 @@ return {
         2792,
     },
 
+    -- Clock on the wall while the brain sits at its menu. Set to false to
+    -- leave the wall black instead -- it is decoration, and nothing else
+    -- depends on it.
+    IDLE_CLOCK = true,
+
     MENU_MUSIC_VOLUME = 0.5,
     MENU_MUSIC_NAME = nil,
 

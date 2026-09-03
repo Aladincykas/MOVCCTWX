@@ -247,6 +247,7 @@ local function runMainMenu()
     -- perfectly usable instead of taking it down -- the clock is decoration,
     -- the menu is not.
     basalt.schedule(function()
+        if config.IDLE_CLOCK == false then return end
         local ok = pcall(function()
             local idlescreen = require("idlescreen")
             local wall = getWall("music")

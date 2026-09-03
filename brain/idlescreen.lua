@@ -127,7 +127,17 @@ end
 -- moved rewrites only the tiles that digit touches, not all twelve monitors.
 function M.run(wall, shouldStop)
     while not shouldStop() do
+        -- Checked immediately before AND after drawing. A frame takes real
+        -- time to build, so playback can begin part-way through one -- and a
+        -- clock frame landing after that point would both appear over the
+        -- video and poison the wall's tile cache, so the video's next frame
+        -- would diff against clock pixels and skip redrawing them.
+        --
+        -- Set by whoever owns the wall (see videoplayer/musicplayer), so this
+        -- does not depend on the menu's own bookkeeping being timely.
+        if _G.MOVCCTWX_WALL_BUSY then return end
         M.draw(wall)
+        if _G.MOVCCTWX_WALL_BUSY or shouldStop() then return end
         os.sleep(1)
     end
 end

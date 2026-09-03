@@ -206,6 +206,10 @@ function M.play(wall, screen, speakers, entry, config)
     local audioSpanStartMs = nil
     local audioFrozenSec = 0
     local audioFinished = false
+    -- Set if the audio stream dies. Audio is a convenience; the video is the
+    -- point -- so a failed fetch or a dropped connection must leave the
+    -- picture playing rather than ending the whole thing.
+    local audioError = nil
 
     -- How much audio may sit in the speakers unheard. playAudio accepts
     -- blocks until its own buffer is full, which turned out to be nearly six
@@ -214,7 +218,12 @@ function M.play(wall, screen, speakers, entry, config)
     --
     -- Feeding is now paced to the listener instead: enough buffered to ride
     -- out a slow fetch, not so much that the sound lags behind the picture.
-    local AUDIO_BUFFER_TARGET_SEC = 1.5
+    -- Raised from 1.5s: this is how long a stall the speakers can ride out
+    -- before you hear silence, and rare dropouts on a busy server were
+    -- getting through. Costs nothing that matters -- the picture paces to the
+    -- sound, so they stay in step whatever the buffer depth, and pause
+    -- discards it instantly either way.
+    local AUDIO_BUFFER_TARGET_SEC = 3.0
     -- Set when the last video chunk is done, so the audio stream stops with
     -- it rather than holding playback open to the end of the soundtrack.
     local videoDone = false
@@ -400,6 +409,12 @@ function M.play(wall, screen, speakers, entry, config)
         end
         audioFinished = true
     end
+
+    -- Claim the wall for the whole of playback, so the menu's idle clock
+    -- cannot draw over a video even if its coroutine outlives the menu --
+    -- Basalt's schedules table is module-level and never cleared, so that is
+    -- a real possibility rather than a theoretical one.
+    _G.MOVCCTWX_WALL_BUSY = true
 
     drawStatus(screen, ("Loading %s..."):format(entry.name))
     local file = fetchChunkToMemory(entry.chunks[1])
@@ -652,6 +667,9 @@ function M.play(wall, screen, speakers, entry, config)
         while not state.stopRequested and not videoDone do
             -- Nothing decodes while paused, so lastFrameMs stops moving and
             -- a pause would otherwise be reported as a freeze.
+            -- An audio failure is silent by nature, so it has to be said out
+            -- loud or it just looks like the speakers stopped working.
+            if audioError then phase = "GARSAS NUTRUKO" end
             local stalledMs = state.paused and 0 or (os.epoch("utc") - lastFrameMs)
             drawControls(screen, state, entry, entry.durationSec or 0, {
                 driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
@@ -675,7 +693,23 @@ function M.play(wall, screen, speakers, entry, config)
     -- pcall'd so the speakers get silenced even when playback exits by
     -- error -- notably [q], which raises "Terminated" to unwind all the way
     -- out of the menus.
-    local ranOk, runErr = pcall(parallel.waitForAll, videoLoop, streamAudio, statusLoop)
+    -- Each branch is individually pcall'd. Only the video loop is allowed to
+    -- end playback: an error anywhere in waitForAll propagates out of ALL of
+    -- them, so without this a transient http failure while fetching audio, or
+    -- one bad draw in the status line, closed the video outright. Confirmed
+    -- in-game as playback simply disappearing mid-video.
+    local ranOk, runErr = pcall(parallel.waitForAll,
+        videoLoop,
+        function()
+            local ok, err = pcall(streamAudio)
+            if not ok then audioError = tostring(err) end
+        end,
+        function()
+            -- Only decoration; never a reason to stop.
+            pcall(statusLoop)
+        end)
+
+    _G.MOVCCTWX_WALL_BUSY = false
 
     -- Stopping playback has to DISCARD what the speakers are holding, not
     -- just stop supplying them. There is up to AUDIO_BUFFER_TARGET_SEC of
@@ -691,7 +725,14 @@ function M.play(wall, screen, speakers, entry, config)
         screen.setTextColor(colors.white)
         screen.clear()
         _G.MOVCCTWX_STATUS = { screen = "video_menu" }
-        error(runErr, 0)
+        -- Ctrl+T has to keep unwinding all the way out, as it would anywhere
+        -- else. Anything else is reported and handed back to the menu, rather
+        -- than thrown at whatever called us -- a video failing is not a reason
+        -- for the whole program to fall over.
+        if tostring(runErr):find("Terminated") then error(runErr, 0) end
+        drawStatus(screen, "Playback error: " .. tostring(runErr))
+        os.sleep(2)
+        return "done"
     end
 
     wall.setBackgroundColor(colors.black)

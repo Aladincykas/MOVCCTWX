@@ -157,6 +157,11 @@ end
 -- first, for a remote "play_playlist" command. Falls through to the
 -- normal library screen if the playlist is empty.
 function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlaylist)
+    -- Claim the wall for the whole session, so the menu's idle clock cannot
+    -- draw over the visuals if its coroutine outlives the menu -- Basalt's
+    -- schedules table is module-level and never cleared, so that is a real
+    -- possibility rather than a theoretical one.
+    _G.MOVCCTWX_WALL_BUSY = true
     local w, h = mon.getSize()
     local manifestUrls = buildManifestUrls(config)
 
@@ -1272,6 +1277,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         end
     end
 
+    _G.MOVCCTWX_WALL_BUSY = false
     return _G.MOVCCTWX_TERMINATED and "quit" or exitReason
 end
 
