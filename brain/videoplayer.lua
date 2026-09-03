@@ -135,7 +135,13 @@ local function drawFrame(wall, image, lastPalette, lastRows, patches)
         if not prevRow or prevRow[1] ~= text or prevRow[2] ~= fg or prevRow[3] ~= bg then
             wall.setCursorPos(1, y)
             wall.blit(text, fg, bg)
-            lastRows[y] = { text, fg, bg }
+            -- An UNPATCHED row stores the decoder's own row table, exactly as
+            -- this did before subtitles existed. Allocating a fresh table for
+            -- every row of every frame instead would be 2400 short-lived
+            -- tables a second at 20fps on 120 rows, and the garbage collector
+            -- runs on the same single Lua thread as decoding and drawing.
+            -- Only the handful of rows a subtitle actually covers pay that.
+            lastRows[y] = patch and { text, fg, bg } or r
         end
     end
 end
@@ -157,7 +163,7 @@ end
 -- durationSec}) in order onto `wall` (see wall.lua), with status/controls
 -- on `screen` (the computer's own terminal). Returns "done" when playback
 -- finishes normally, or "stopped" on user/remote stop.
-function M.play(wall, screen, speakers, entry, config)
+function M.play(wall, screen, speakers, entry, config, opts)
     local savedSettings = settings.load()
     local state = {
         paused = false,
@@ -209,7 +215,16 @@ function M.play(wall, screen, speakers, entry, config)
     -- Fetched once, up front: a film's cue file is smaller than any one video
     -- chunk, and doing it here means it can never interrupt playback later.
     local subtitleCursor, subtitleScale = nil, nil
-    local subtitlesOn = config.SUBTITLES ~= false
+    -- The menu asks per video when one actually HAS subtitles, and passes
+    -- the answer in. Written out rather than folded into an `and`/`or` chain
+    -- because the answer can legitimately be false, which such a chain would
+    -- silently turn back into the config default.
+    local subtitlesOn
+    if opts and opts.subtitles ~= nil then
+        subtitlesOn = opts.subtitles and true or false
+    else
+        subtitlesOn = config.SUBTITLES ~= false
+    end
     if type(entry.subs) == "string" and entry.subs ~= "" then
         local ok = pcall(function()
             local url = entry.subs .. (entry.subs:find("?") and "&" or "?")
@@ -358,12 +373,30 @@ function M.play(wall, screen, speakers, entry, config)
             for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
         end
 
+        -- How much of the SOUNDTRACK the parts already finished account for,
+        -- counted in bytes consumed rather than in time elapsed.
+        local partsPlayedSec = 0
+
         for _, url in ipairs(entry.audio) do
             if state.stopRequested or videoDone then break end
 
-            local partStartSec = posSec
+            -- This used to be `posSec`, and that was wrong in a way only long
+            -- videos show. The feed deliberately runs AUDIO_BUFFER_TARGET_SEC
+            -- ahead of what has actually been heard, so at the moment a part's
+            -- HTTP response runs out, posSec is about three seconds SHORT of
+            -- that part's real end. The next part then started its clock three
+            -- seconds behind the truth, the picture computed that it was three
+            -- seconds ahead, and it waited -- freezing at the seam for as long
+            -- as the buffer, once per audio part.
+            --
+            -- Audio parts are about forty minutes each (CHUNK_TARGET_BYTES at
+            -- a flat 6000 bytes per second), so this only bites on a film or a
+            -- full episode, and it compounds at every seam after the first.
+            local partStartSec = partsPlayedSec
             local reopenAtByte = 0
             local partFinished = false
+            -- Bytes this part turned out to hold, known only once it runs out.
+            local partBytes = 0
 
             while not partFinished and not state.stopRequested and not videoDone do
                 -- Resuming re-requests the file from the byte the listener
@@ -404,7 +437,13 @@ function M.play(wall, screen, speakers, entry, config)
                     if state.paused then pausedHere = true break end
 
                     local data = response.read(BLOCK)
-                    if not data then partFinished = true break end
+                    if not data then
+                        partFinished = true
+                        -- reopenAtByte covers everything consumed before the
+                        -- last resume, spanBytes everything since.
+                        partBytes = reopenAtByte + spanBytes
+                        break
+                    end
 
                     local chunk = decoder(data)
                     local funcs = {}
@@ -462,8 +501,25 @@ function M.play(wall, screen, speakers, entry, config)
                     end
                 end
             end
+
+            -- Only advanced for a part that genuinely ran to its end. A part
+            -- abandoned because playback stopped must not push the clock
+            -- forward by a length nobody heard.
+            if partFinished then
+                partsPlayedSec = partStartSec + partBytes / DFPWM_BYTES_PER_SECOND
+            end
         end
         audioFinished = true
+    end
+
+    -- An upload that failed partway can leave an entry in videos.json with an
+    -- empty chunk list. Reaching fetchChunkToMemory(nil) from there threw out
+    -- of M.play, past runVideoMenu (which does not pcall it) and out of
+    -- startup.lua altogether -- one bad entry took down the whole brain.
+    if type(entry.chunks) ~= "table" or #entry.chunks == 0 then
+        drawStatus(screen, ("\"%s\" has no chunks -- re-upload it."):format(entry.name))
+        os.sleep(2.5)
+        return "done"
     end
 
     -- Claim the wall for the whole of playback, so the menu's idle clock
@@ -473,7 +529,18 @@ function M.play(wall, screen, speakers, entry, config)
     _G.MOVCCTWX_WALL_BUSY = true
 
     drawStatus(screen, ("Loading %s..."):format(entry.name))
-    local file = fetchChunkToMemory(entry.chunks[1])
+    -- pcall'd because this sits BETWEEN claiming the wall and the pcall that
+    -- guards the rest of playback. A GitHub hiccup on the very first chunk
+    -- used to throw straight out of here, which both crashed the brain and
+    -- left MOVCCTWX_WALL_BUSY stuck true -- so the idle clock stayed dead for
+    -- the rest of the session even after a reboot back into the menu.
+    local fetchedOk, file = pcall(fetchChunkToMemory, entry.chunks[1])
+    if not fetchedOk then
+        _G.MOVCCTWX_WALL_BUSY = false
+        drawStatus(screen, "Could not load: " .. tostring(file))
+        os.sleep(2.5)
+        return "done"
+    end
     local nextFile = nil
 
     -- The chunk loop and the audio stream run alongside each other for the
@@ -802,6 +869,19 @@ function M.play(wall, screen, speakers, entry, config)
             pcall(statusLoop)
         end)
 
+    -- Blanking the wall must never be what takes the program down. A monitor
+    -- broken off its network mid-video makes every call on the wrapped
+    -- peripheral throw, and this runs on the way OUT of playback -- including
+    -- on the error path, where an unguarded throw here would replace whatever
+    -- actually went wrong with a peripheral error. A monitor block has been
+    -- physically broken on this build before, so this is not hypothetical.
+    local function clearWall()
+        pcall(function()
+            wall.setBackgroundColor(colors.black)
+            wall.clear()
+        end)
+    end
+
     _G.MOVCCTWX_WALL_BUSY = false
 
     -- Stopping playback has to DISCARD what the speakers are holding, not
@@ -812,8 +892,7 @@ function M.play(wall, screen, speakers, entry, config)
     for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
 
     if not ranOk then
-        wall.setBackgroundColor(colors.black)
-        wall.clear()
+        clearWall()
         screen.setBackgroundColor(colors.black)
         screen.setTextColor(colors.white)
         screen.clear()
@@ -828,8 +907,7 @@ function M.play(wall, screen, speakers, entry, config)
         return "done"
     end
 
-    wall.setBackgroundColor(colors.black)
-    wall.clear()
+    clearWall()
     screen.setBackgroundColor(colors.black)
     screen.setTextColor(colors.white)
     screen.clear()

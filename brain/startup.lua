@@ -53,13 +53,28 @@ _G.MOVCCTWX_STATUS = { screen = "menu" }
 -- screen) after every add/remove -- re-reads the settings file fresh each
 -- time rather than caching it, so this can't clobber a volume level saved
 -- by the OTHER file in between.
+--
+-- The VIDEO playlist alongside it works the same way, with one deliberate
+-- difference: its entries hold only { name = ... }, never the manifest entry
+-- itself. A film's entry carries a couple of hundred chunk URLs, so keeping
+-- whole entries would push hundreds of kilobytes through settings.json on
+-- every add AND through every rednet ack, since each one carries the
+-- playlists. Names are resolved against the manifest at play time, which also
+-- means a video deleted from its repo is skipped rather than failing to
+-- download halfway through the queue.
 do
     local saved = settings.load()
     _G.MOVCCTWX_PLAYLIST = (type(saved.playlist) == "table") and saved.playlist or {}
+    _G.MOVCCTWX_VIDEO_PLAYLIST = (type(saved.videoPlaylist) == "table") and saved.videoPlaylist or {}
 end
 function _G.MOVCCTWX_SAVE_PLAYLIST()
     local saved = settings.load()
     saved.playlist = _G.MOVCCTWX_PLAYLIST
+    settings.save(saved)
+end
+function _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+    local saved = settings.load()
+    saved.videoPlaylist = _G.MOVCCTWX_VIDEO_PLAYLIST
     settings.save(saved)
 end
 
@@ -117,22 +132,46 @@ local function clearFrameChildren(f)
     end
 end
 
+-- Returns the merged list, plus the labels of any libraries that did not
+-- load.
+--
+-- A library that 404s, times out, or comes back as something other than JSON
+-- used to vanish from the list silently. That is indistinguishable from "my
+-- upload never arrived", which is the single most confusing failure this
+-- project has -- so the caller now says how many libraries are missing
+-- instead of quietly showing a short list.
+--
+-- Entries without a usable name are dropped here too. One malformed record
+-- used to take down the whole menu on `video.name:sub(...)`, losing access to
+-- every other video in the library along with it.
 local function fetchMergedManifest(libraries, manifestFile)
     local items = {}
+    local failed = {}
     for _, lib in ipairs(libraries) do
         local url = ("https://raw.githubusercontent.com/%s/%s/%s/%s?t=%s")
             :format(config.GITHUB_USER, lib.repo, lib.branch, manifestFile, tostring(os.epoch("utc")))
-        local response = http.get(url)
-        if response then
+        local ok, response = pcall(http.get, url)
+        local parsed = nil
+        if ok and response then
             local body = response.readAll()
             response.close()
-            local parsed = textutils.unserialiseJSON(body)
-            if type(parsed) == "table" then
-                for _, item in ipairs(parsed) do table.insert(items, item) end
+            parsed = textutils.unserialiseJSON(body)
+        end
+        if type(parsed) == "table" then
+            for _, item in ipairs(parsed) do
+                if type(item) == "table" and type(item.name) == "string" then
+                    -- Which library an entry came from. Prefixed so it can
+                    -- never collide with a field the manifest itself defines.
+                    item.__films = lib.films == true
+                    item.__library = lib.label
+                    table.insert(items, item)
+                end
             end
+        else
+            table.insert(failed, lib.label or lib.repo)
         end
     end
-    return items
+    return items, failed
 end
 
 local wallInstance = nil
@@ -280,60 +319,335 @@ local function runMainMenu()
 end
 
 -- ==== Video: list + play ====
+
+-- Does this entry ship a subtitle file?
+local function hasSubtitles(entry)
+    return type(entry.subs) == "string" and entry.subs ~= ""
+end
+
+-- Asks whether to show subtitles. Returns true, false, or nil for "go back".
+--
+-- Only reached when the video actually HAS subtitles -- anything without
+-- them plays straight away, which is what keeps the extra tap tolerable on
+-- the ones that do.
+local function askSubtitles(entry)
+    local answer, backed = nil, false
+    resetScreen()
+    clearFrameChildren(frame)
+
+    local buttonW = math.min(w - 4, 28)
+    local bx = math.max(1, math.floor((w - buttonW) / 2) + 1)
+    local top = math.max(2, math.floor((h - 9) / 2) + 1)
+
+    frame:addLabel():setText(entry.name:sub(1, w - 2))
+        :setPosition(2, top):setForeground(colors.white):setBackground(colors.black)
+    frame:addLabel():setText("This one has subtitles.")
+        :setPosition(2, top + 1):setForeground(colors.lightGray):setBackground(colors.black)
+
+    frame:addButton():setText("Play WITH subtitles"):setPosition(bx, top + 3):setSize(buttonW, 1)
+        :setBackground(colors.lime):setForeground(colors.black)
+        :onClick(function() answer = true basalt.stop() end)
+    frame:addButton():setText("Play without"):setPosition(bx, top + 5):setSize(buttonW, 1)
+        :setBackground(colors.gray):setForeground(colors.lime)
+        :onClick(function() answer = false basalt.stop() end)
+    frame:addButton():setText("Back"):setPosition(bx, top + 7):setSize(buttonW, 1)
+        :setBackground(colors.red):setForeground(colors.white)
+        :onClick(function() backed = true basalt.stop() end)
+
+    frame:addLabel():setText("[t] toggles them mid-video too.")
+        :setPosition(2, math.min(h, top + 9)):setForeground(colors.gray):setBackground(colors.black)
+
+    frame:draw()
+    basalt.run()
+    if backed or _G.MOVCCTWX_TERMINATED or _G.MOVCCTWX_REMOTE_PENDING then return nil end
+    return answer
+end
+
+-- Plays every video on the video playlist in order.
+--
+-- Shared by the Play All button and the remote's play_video_playlist, so
+-- both behave identically. Subtitles follow config.SUBTITLES here rather
+-- than prompting: stopping between queued clips to ask a question would
+-- defeat the point of a queue.
+local function playVideoPlaylist(videoplayer, videos)
+    local playlist = _G.MOVCCTWX_VIDEO_PLAYLIST
+    local i = 1
+    while i <= #playlist and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+        local match = nil
+        for _, v in ipairs(videos) do
+            if v.name == playlist[i].name then match = v break end
+        end
+        if match then
+            local reason = videoplayer.play(getWall("video"), term, speakers, match, config)
+            -- "stopped" means somebody pressed stop, which should end the
+            -- whole queue rather than move to the next one.
+            if reason ~= "done" then break end
+        end
+        i = i + 1
+    end
+end
+
 local function runVideoMenu()
     local videoplayer = require("videoplayer")
     local exitReason = nil
-    local page = 1
+    local screen = "library"
     local ROW_STEP = 2
     local contentTop = 3
     local footerRow = h
+    local playlist = _G.MOVCCTWX_VIDEO_PLAYLIST
 
-    while not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
-        local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
-        local selectedVideo = nil
+    local videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
 
-        local perPage = math.max(1, math.floor((footerRow - contentTop) / ROW_STEP))
+    local page, playlistPage, addPage = 1, 1, 1
+    local selectedVideo, nextScreen, playlistAction = nil, nil, nil
+
+    -- Only clips can be queued. See config.lua's VIDEO_LIBRARIES comment.
+    local function addable()
+        local out = {}
+        for _, v in ipairs(videos) do
+            if not v.__films then out[#out + 1] = v end
+        end
+        return out
+    end
+
+    local function onPlaylist(name)
+        for _, item in ipairs(playlist) do
+            if item.name == name then return true end
+        end
+        return false
+    end
+
+    local function addToPlaylist(video)
+        if onPlaylist(video.name) then return false end
+        -- Only the name: see the MOVCCTWX_VIDEO_PLAYLIST comment at the top.
+        table.insert(playlist, { name = video.name })
+        _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+        return true
+    end
+
+    -- Four footer buttons plus a right-anchored exit, sized from the real
+    -- screen width. The old fixed widths left about four free columns on this
+    -- computer's terminal, which is not enough for another button.
+    local backW = math.min(12, math.max(6, math.floor(w * 0.22)))
+    local navW = math.max(6, math.floor((w - 4 - backW - 2) / 3))
+    local navX = { 2, 3 + navW, 4 + navW * 2 }
+    -- Right-anchored. Deliberately NOT max()'d against where the nav row
+    -- ends: on a screen too narrow for all four, overlapping is recoverable
+    -- and being pushed off the right edge is not.
+    local backX = w - backW + 1
+
+    local perPage = math.max(1, math.floor((footerRow - contentTop) / ROW_STEP))
+    -- The playlist screen carries an extra footer row (Play All / Back) above
+    -- the navigation one, so it fits one row fewer than the library does.
+    local playlistPerPage = math.max(1, math.floor((footerRow - ROW_STEP - contentTop) / ROW_STEP))
+
+    local function header(text, subtitle, subtitleColor)
+        frame:addLabel():setText(text:sub(1, w))
+            :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
+        frame:addLabel():setText(subtitle:sub(1, w))
+            :setPosition(2, 2):setForeground(subtitleColor or colors.lightGray):setBackground(colors.black)
+    end
+
+    local drawLibrary, drawPlaylist, drawAddVideos
+
+    function drawLibrary()
+        resetScreen()
+        clearFrameChildren(frame)
         local totalPages = math.max(1, math.ceil(#videos / perPage))
+        if page > totalPages then page = totalPages end
 
-        local function draw()
-            resetScreen()
-            clearFrameChildren(frame)
-            if page > totalPages then page = totalPages end
+        local note, noteColor
+        if #loadErrors > 0 then
+            note = ("%d video(s) -- %d librar(ies) did not load"):format(#videos, #loadErrors)
+            noteColor = colors.red
+        elseif #videos == 0 then
+            note = "No videos yet."
+        else
+            note = ("%d video(s) -- page %d/%d"):format(#videos, page, totalPages)
+        end
+        header(" DIDZIULIS EKRANAS -- SELECT A VIDEO ", note, noteColor)
 
-            frame:addLabel():setText((" DIDZIULIS EKRANAS -- SELECT A VIDEO "):sub(1, w))
-                :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
-
-            frame:addLabel()
-                :setText(#videos == 0 and "No videos yet." or ("%d video(s) -- page %d/%d"):format(#videos, page, totalPages))
-                :setPosition(2, 2):setForeground(colors.lightGray):setBackground(colors.black)
-
-            local startIdx = (page - 1) * perPage + 1
-            for i = 0, perPage - 1 do
-                local video = videos[startIdx + i]
-                if video then
+        local addW = 3
+        local startIdx = (page - 1) * perPage + 1
+        for i = 0, perPage - 1 do
+            local video = videos[startIdx + i]
+            if video then
+                local rowY = contentTop + i * ROW_STEP
+                -- A film gets the whole row; a clip gives up three columns to
+                -- its queue button.
+                local rowW = video.__films and (w - 2) or (w - 2 - addW - 1)
+                local label = video.name
+                if hasSubtitles(video) then label = label .. " [S]" end
+                frame:addButton()
+                    :setText(label:sub(1, rowW - 2))
+                    :setPosition(2, rowY)
+                    :setSize(rowW, 1)
+                    :setBackground(colors.gray)
+                    :setForeground(colors.lime)
+                    :onClick(function() selectedVideo = video basalt.stop() end)
+                if not video.__films then
+                    local queued = onPlaylist(video.name)
                     frame:addButton()
-                        :setText(video.name:sub(1, w - 4))
-                        :setPosition(2, contentTop + i * ROW_STEP)
-                        :setSize(w - 2, 1)
-                        :setBackground(colors.gray)
-                        :setForeground(colors.lime)
-                        :onClick(function() selectedVideo = video basalt.stop() end)
+                        :setText(queued and "-" or "+")
+                        :setPosition(w - addW, rowY)
+                        :setSize(addW, 1)
+                        :setBackground(queued and colors.lime or colors.gray)
+                        :setForeground(queued and colors.black or colors.lime)
+                        :onClick(function()
+                            if onPlaylist(video.name) then
+                                for j, item in ipairs(playlist) do
+                                    if item.name == video.name then table.remove(playlist, j) break end
+                                end
+                                _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+                            else
+                                addToPlaylist(video)
+                            end
+                            drawLibrary()
+                        end)
                 end
             end
-
-            local navW = math.min(math.floor((w - 8) / 3), 14)
-            frame:addButton():setText("< Prev"):setPosition(2, footerRow):setSize(navW, 1)
-                :setBackground(colors.gray):setForeground(colors.lime)
-                :onClick(function() if page > 1 then page = page - 1 end draw() end)
-            frame:addButton():setText("Next >"):setPosition(4 + navW, footerRow):setSize(navW, 1)
-                :setBackground(colors.gray):setForeground(colors.lime)
-                :onClick(function() if page < totalPages then page = page + 1 end draw() end)
-            frame:addButton():setText("Back to Menu"):setPosition(w - math.min(w - 2, 16) + 1, footerRow)
-                :setSize(math.min(w - 2, 16), 1):setBackground(colors.red):setForeground(colors.white)
-                :onClick(function() exitReason = "menu" basalt.stop() end)
         end
 
-        draw()
+        frame:addButton():setText("< Prev"):setPosition(navX[1], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if page > 1 then page = page - 1 end drawLibrary() end)
+        frame:addButton():setText("Next >"):setPosition(navX[2], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if page < totalPages then page = page + 1 end drawLibrary() end)
+        frame:addButton():setText(("Queue (%d)"):format(#playlist)):setPosition(navX[3], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() nextScreen = "playlist" basalt.stop() end)
+        frame:addButton():setText("Menu"):setPosition(backX, footerRow):setSize(backW, 1)
+            :setBackground(colors.red):setForeground(colors.white)
+            :onClick(function() exitReason = "menu" basalt.stop() end)
+    end
+
+    function drawPlaylist()
+        resetScreen()
+        clearFrameChildren(frame)
+        local totalPages = math.max(1, math.ceil(#playlist / playlistPerPage))
+        if playlistPage > totalPages then playlistPage = totalPages end
+
+        header(" VIDEO QUEUE ",
+            #playlist == 0 and "Empty -- tap + Add below."
+                or ("%d video(s) -- page %d/%d"):format(#playlist, playlistPage, totalPages))
+
+        local removeW = 3
+        local startIdx = (playlistPage - 1) * playlistPerPage + 1
+        for i = 0, playlistPerPage - 1 do
+            local idx = startIdx + i
+            local item = playlist[idx]
+            if item then
+                local rowY = contentTop + i * ROW_STEP
+                -- A queued name whose video is no longer in any library is
+                -- shown greyed rather than hidden, so it can be removed
+                -- rather than silently skipped forever at play time.
+                local stillThere = false
+                for _, v in ipairs(videos) do
+                    if v.name == item.name then stillThere = true break end
+                end
+                frame:addLabel()
+                    :setText((("%d. %s"):format(idx, item.name)):sub(1, w - removeW - 3))
+                    :setPosition(2, rowY)
+                    :setSize(w - removeW - 2, 1)
+                    :setForeground(stillThere and colors.white or colors.gray)
+                    :setBackground(colors.black)
+                frame:addButton()
+                    :setText("X")
+                    :setPosition(w - removeW, rowY)
+                    :setSize(removeW, 1)
+                    :setBackground(colors.red)
+                    :setForeground(colors.white)
+                    :onClick(function()
+                        table.remove(playlist, idx)
+                        _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+                        drawPlaylist()
+                    end)
+            end
+        end
+
+        frame:addButton():setText("< Prev"):setPosition(navX[1], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if playlistPage > 1 then playlistPage = playlistPage - 1 end drawPlaylist() end)
+        frame:addButton():setText("Next >"):setPosition(navX[2], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if playlistPage < totalPages then playlistPage = playlistPage + 1 end drawPlaylist() end)
+        frame:addButton():setText("+ Add"):setPosition(navX[3], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() playlistAction = "add" basalt.stop() end)
+
+        local topRow = footerRow - ROW_STEP
+        local halfW = math.max(6, math.floor((w - 3) / 2))
+        frame:addButton():setText("Play All"):setPosition(2, topRow):setSize(halfW, 1)
+            :setBackground(#playlist > 0 and colors.lime or colors.gray)
+            :setForeground(#playlist > 0 and colors.black or colors.lightGray)
+            :onClick(function()
+                if #playlist > 0 then playlistAction = "play" basalt.stop() end
+            end)
+        frame:addButton():setText("Back"):setPosition(3 + halfW, topRow):setSize(halfW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() playlistAction = "back" basalt.stop() end)
+    end
+
+    function drawAddVideos()
+        resetScreen()
+        clearFrameChildren(frame)
+        local pool = addable()
+        local totalPages = math.max(1, math.ceil(#pool / perPage))
+        if addPage > totalPages then addPage = totalPages end
+
+        header(" ADD TO VIDEO QUEUE ",
+            #pool == 0 and "No clips available (films cannot be queued)."
+                or ("%d clip(s) -- page %d/%d -- queue: %d"):format(#pool, addPage, totalPages, #playlist))
+
+        local startIdx = (addPage - 1) * perPage + 1
+        for i = 0, perPage - 1 do
+            local video = pool[startIdx + i]
+            if video then
+                local queued = onPlaylist(video.name)
+                frame:addButton()
+                    :setText(((queued and "* " or "  ") .. video.name):sub(1, w - 4))
+                    :setPosition(2, contentTop + i * ROW_STEP)
+                    :setSize(w - 2, 1)
+                    :setBackground(queued and colors.lime or colors.gray)
+                    :setForeground(queued and colors.black or colors.lime)
+                    :onClick(function()
+                        -- Tap again to take it back off, so a mistap costs one
+                        -- tap rather than a trip to the queue screen.
+                        if onPlaylist(video.name) then
+                            for j, item in ipairs(playlist) do
+                                if item.name == video.name then table.remove(playlist, j) break end
+                            end
+                            _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+                        else
+                            addToPlaylist(video)
+                        end
+                        drawAddVideos()
+                    end)
+            end
+        end
+
+        frame:addButton():setText("< Prev"):setPosition(navX[1], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if addPage > 1 then addPage = addPage - 1 end drawAddVideos() end)
+        frame:addButton():setText("Next >"):setPosition(navX[2], footerRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if addPage < totalPages then addPage = addPage + 1 end drawAddVideos() end)
+        frame:addButton():setText("Done"):setPosition(backX, footerRow):setSize(backW, 1)
+            :setBackground(colors.red):setForeground(colors.white)
+            :onClick(function() playlistAction = "back" basalt.stop() end)
+    end
+
+    while not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+        selectedVideo, nextScreen, playlistAction = nil, nil, nil
+
+        if screen == "library" then
+            drawLibrary()
+        elseif screen == "playlist" then
+            drawPlaylist()
+        else
+            drawAddVideos()
+        end
         frame:draw()
         basalt.run()
 
@@ -341,10 +655,34 @@ local function runVideoMenu()
         if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
 
         if selectedVideo then
-            local wall = getWall("video")
-            videoplayer.play(wall, term, speakers, selectedVideo, config)
+            -- Asked here, not inside the player: the player is a raw event
+            -- loop with the wall already handed to it, and a Basalt screen
+            -- cannot be opened from in there.
+            local subtitleChoice = nil
+            local go = true
+            if hasSubtitles(selectedVideo) then
+                subtitleChoice = askSubtitles(selectedVideo)
+                go = subtitleChoice ~= nil
+            end
+            if go then
+                videoplayer.play(getWall("video"), term, speakers, selectedVideo, config,
+                    { subtitles = subtitleChoice })
+                if _G.MOVCCTWX_TERMINATED then return "quit" end
+                if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
+                -- Something may have been uploaded while that was playing.
+                videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+            end
+        elseif nextScreen then
+            screen = nextScreen
+        elseif playlistAction == "play" then
+            playVideoPlaylist(videoplayer, videos)
             if _G.MOVCCTWX_TERMINATED then return "quit" end
             if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
+            videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+        elseif playlistAction == "add" then
+            screen = "addVideos"
+        elseif playlistAction == "back" then
+            screen = (screen == "addVideos") and "playlist" or "library"
         end
     end
 
@@ -373,15 +711,25 @@ local function mainLoop()
 
         if type(screen) == "table" then
             if screen.screen == "video" then
-                if screen.name then
-                    local videoplayer = require("videoplayer")
-                    local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+                local videoplayer = require("videoplayer")
+                local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+                if screen.playAllPlaylist then
+                    playVideoPlaylist(videoplayer, videos)
+                elseif screen.name then
                     local match = nil
                     for _, v in ipairs(videos) do if v.name == screen.name then match = v end end
-                    if match then videoplayer.play(getWall("video"), term, speakers, match, config) end
+                    if match then
+                        videoplayer.play(getWall("video"), term, speakers, match, config,
+                            { subtitles = screen.subtitles })
+                    end
                 end
                 _G.MOVCCTWX_STATUS = { screen = "menu" }
-                screen = "menu"
+                -- Checked HERE, not left to the loop's own quit branch: that
+                -- branch sits BELOW the "menu" one, so quitting out of a
+                -- remotely started video used to drop straight back into the
+                -- main menu -- and with the terminate watcher already spent,
+                -- Ctrl+T no longer worked there.
+                screen = _G.MOVCCTWX_TERMINATED and "quit" or "menu"
             else
                 pendingSongName = screen.name
                 pendingPlayAllPlaylist = screen.playAllPlaylist or false
@@ -456,7 +804,11 @@ end
 -- check (at the top of its loop) takes over from there.
 local function remoteMenuWatcher()
     while true do
-        local _, action, name = os.pullEvent("movcctwx_remote_action")
+        -- The third value is a per-command option: for play_video it is the
+        -- pocket's subtitle answer (true/false), absent for everything else.
+        -- A plain boolean rather than a table, since os.queueEvent's handling
+        -- of table arguments is not something worth depending on here.
+        local _, action, name, option = os.pullEvent("movcctwx_remote_action")
         if action == "open_video_menu" then
             _G.MOVCCTWX_REMOTE_TARGET = "video"
             _G.MOVCCTWX_REMOTE_PENDING = true
@@ -464,7 +816,10 @@ local function remoteMenuWatcher()
             _G.MOVCCTWX_REMOTE_TARGET = "music"
             _G.MOVCCTWX_REMOTE_PENDING = true
         elseif action == "play_video" then
-            _G.MOVCCTWX_REMOTE_TARGET = { screen = "video", name = name }
+            _G.MOVCCTWX_REMOTE_TARGET = { screen = "video", name = name, subtitles = option }
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        elseif action == "play_video_playlist" then
+            _G.MOVCCTWX_REMOTE_TARGET = { screen = "video", playAllPlaylist = true }
             _G.MOVCCTWX_REMOTE_PENDING = true
         elseif action == "play_music" then
             _G.MOVCCTWX_REMOTE_TARGET = { screen = "music", name = name }

@@ -28,10 +28,11 @@ local function findBrain()
 end
 
 -- Sends one command and waits briefly for the brain's ok/reject reply.
--- Returns true, nil, status, playlist on success (status is the brain's
--- current _G.MOVCCTWX_STATUS snapshot, playlist its current
--- _G.MOVCCTWX_PLAYLIST -- see remote.lua -- both attached to every ack,
--- not just get_status's); false, reason on rejection/timeout.
+-- Returns true, nil, status, playlist, videoPlaylist on success (status is
+-- the brain's current _G.MOVCCTWX_STATUS snapshot, and the two queues its
+-- _G.MOVCCTWX_PLAYLIST / _G.MOVCCTWX_VIDEO_PLAYLIST -- see remote.lua, all
+-- three are attached to every ack, not just get_status's); false, reason on
+-- rejection/timeout.
 -- extra: optional table of additional fields merged into the message
 -- (playlist_add's `song`, for instance).
 local function send(brainId, action, name, extra)
@@ -45,7 +46,7 @@ local function send(brainId, action, name, extra)
     if not reply.ok then
         return false, reply.reason or "rejected"
     end
-    return true, nil, reply.status, reply.playlist
+    return true, nil, reply.status, reply.playlist, reply.videoPlaylist
 end
 
 local function formatTime(seconds)
@@ -66,7 +67,16 @@ local function fetchMergedManifest(libraries, manifestFile)
             response.close()
             local parsed = textutils.unserialiseJSON(body)
             if type(parsed) == "table" then
-                for _, item in ipairs(parsed) do table.insert(items, item) end
+                for _, item in ipairs(parsed) do
+                    if type(item) == "table" and type(item.name) == "string" then
+                        -- Which library it came from. The pocket needs this
+                        -- for the same reason the brain does: a film cannot
+                        -- go in the video queue. Prefixed so it can never
+                        -- collide with a real manifest field.
+                        item.__films = lib.films == true
+                        table.insert(items, item)
+                    end
+                end
             end
         end
     end
@@ -161,7 +171,12 @@ local function wrapLabel(text, width)
     return lines
 end
 
-local function listScreen(title, items, labelFn, onAdd)
+-- addAllowed/addText: optional. addAllowed(item) decides whether THIS row
+-- gets an add button at all (films cannot be queued), addText(item) gives its
+-- caption so it can show whether the item is already queued. The three
+-- reserved columns stay reserved either way, so rows keep a common width and
+-- the list does not visibly ripple as items go in and out of the queue.
+local function listScreen(title, items, labelFn, onAdd, addAllowed, addText)
     local contentTop = 3
     local footerRow = h
     local perPage = math.max(1, math.floor((footerRow - contentTop - 1) / ROWS_PER_ITEM))
@@ -211,9 +226,9 @@ local function listScreen(title, items, labelFn, onAdd)
                         :setForeground(colors.lime)
                         :onClick(function() result = item basalt.stop() end)
                 end
-                if onAdd then
+                if onAdd and (not addAllowed or addAllowed(item)) then
                     frame:addButton()
-                        :setText("+")
+                        :setText(addText and addText(item) or "+")
                         :setPosition(w - addW + 1, rowY)
                         :setSize(addW, ROWS_PER_ITEM)
                         :setBackground(colors.lime)
@@ -249,6 +264,41 @@ end
 -- initialStatus: the status snapshot from the play_video/play_music call
 -- that got us here, if any -- shown immediately instead of a blank first
 -- frame while waiting for the first poll.
+-- Asks whether to show subtitles, for a video that has them.
+--
+-- The brain asks the same question on its own screen; this is the remote's
+-- copy, because starting a film from the pocket must not silently decide it.
+-- Returns true, false, or nil for "go back".
+local function askSubtitles(video)
+    local answer, backed = nil, false
+    resetScreen()
+    clearFrameChildren(frame)
+
+    frame:addLabel():setText(("SUBTITLES"):sub(1, w)):setSize(w, 1):setPosition(1, 1)
+        :setForeground(colors.lime):setBackground(colors.gray)
+
+    local titleLines = wrapLabel(video.name, w)
+    frame:addLabel():setText(titleLines[1] or ""):setPosition(1, 3)
+        :setForeground(colors.white):setBackground(colors.black)
+    frame:addLabel():setText(titleLines[2] or ""):setPosition(1, 4)
+        :setForeground(colors.white):setBackground(colors.black)
+
+    frame:addButton():setText("With subtitles"):setPosition(1, 6):setSize(w, 1)
+        :setBackground(colors.lime):setForeground(colors.black)
+        :onClick(function() answer = true basalt.stop() end)
+    frame:addButton():setText("Without"):setPosition(1, 8):setSize(w, 1)
+        :setBackground(colors.gray):setForeground(colors.lime)
+        :onClick(function() answer = false basalt.stop() end)
+    frame:addButton():setText("Back"):setPosition(1, 10):setSize(w, 1)
+        :setBackground(colors.red):setForeground(colors.white)
+        :onClick(function() backed = true basalt.stop() end)
+
+    frame:draw()
+    basalt.run()
+    if backed then return nil end
+    return answer
+end
+
 local function transportScreen(brainId, kind, name, initialStatus)
     local status = initialStatus
     local nameLabel, nameLabel2, statusLabel, playPauseBtn
@@ -361,14 +411,14 @@ local function transportScreen(brainId, kind, name, initialStatus)
     -- per-tick widget churn/redraw cost that caused the audio-jump issue
     -- on the computer's wall visuals.
     --
-    -- MUSIC ONLY. A queue is a music idea -- songs line up behind the one
-    -- playing -- and there is no video equivalent, so on a video the header
-    -- could only ever read "Queue (0)": a permanently empty box taking up
-    -- half the remote's screen and implying a feature that does not exist.
-    -- The same screen serves both, so it just leaves this part out for
-    -- video and the transport controls sit on their own.
+    -- Shown for BOTH kinds now that videos have a queue of their own. It
+    -- used to be music-only, because on a video the header could only ever
+    -- read "Queue (0)" -- a permanently empty box taking up half the remote's
+    -- screen and implying a feature that did not exist. That reasoning still
+    -- holds when the video queue happens to be empty, so updatePlaylist
+    -- blanks the whole block in that case rather than showing an empty one.
     local plTop, plBottom = 13, h - 1
-    local plCapacity = (kind == "music") and math.max(0, plBottom - plTop) or 0
+    local plCapacity = math.max(0, plBottom - plTop)
     if plCapacity > 0 then
         playlistHeader = frame:addLabel():setPosition(1, plTop):setForeground(colors.lime):setBackground(colors.black)
         for i = 1, plCapacity do
@@ -382,6 +432,13 @@ local function transportScreen(brainId, kind, name, initialStatus)
     local function updatePlaylist(playlist)
         if not playlistHeader then return end
         playlist = playlist or {}
+        -- Nothing queued: draw no header either, so a film plays against a
+        -- clean screen instead of an empty box captioned "Queue (0)".
+        if #playlist == 0 then
+            centerLabel(playlistHeader, plTop, "")
+            for i = 1, plCapacity do centerLabel(playlistLabels[i], plTop + i, "") end
+            return
+        end
         centerLabel(playlistHeader, plTop, ("Queue (%d)"):format(#playlist))
         for i = 1, plCapacity do
             local song = playlist[i]
@@ -401,9 +458,10 @@ local function transportScreen(brainId, kind, name, initialStatus)
 
     basalt.schedule(function()
         while not stopped do
-            local ok, _, newStatus, newPlaylist = send(brainId, "get_status")
+            local ok, _, newStatus, newPlaylist, newVideoPlaylist = send(brainId, "get_status")
             if ok then
                 status = newStatus
+                if kind == "video" then newPlaylist = newVideoPlaylist end
                 if newStatus and newStatus.screen == kind then
                     sawPlaying = true
                 elseif sawPlaying then
@@ -435,7 +493,7 @@ end
 -- just works here too, title and all).
 -- playlist: the initial contents (from whatever get_status/play_* call
 -- got us here) -- refetched after every remove so this stays accurate.
-local function playlistScreen(brainId, playlist)
+local function playlistScreen(brainId, playlist, kind)
     local contentTop = 3
     -- 2 footer rows now, not 1 -- Prev/Next above, Play All/Back below --
     -- a playlist longer than one screenful used to just silently hide the
@@ -446,17 +504,25 @@ local function playlistScreen(brainId, playlist)
     local perPage = math.max(1, navRow - contentTop)
     local page = 1
 
+    -- The same screen drives both queues; only the action names, the heading
+    -- and the "where do I add things" hint differ.
+    local isVideo = kind == "video"
+    local removeAction = isVideo and "video_playlist_remove" or "playlist_remove"
+    local playAction = isVideo and "play_video_playlist" or "play_playlist"
+    local heading = isVideo and "VIDEO QUEUE" or "PLAYLIST"
+    local emptyHint = isVideo and "Add from Video Player" or "Add from Music Player"
+
     local function draw()
         resetScreen()
         clearFrameChildren(frame)
         local totalPages = math.max(1, math.ceil(#playlist / perPage))
         if page > totalPages then page = totalPages end
-        frame:addLabel():setText(("PLAYLIST -- pg %d/%d"):format(page, totalPages):sub(1, w))
+        frame:addLabel():setText(("%s -- pg %d/%d"):format(heading, page, totalPages):sub(1, w))
             :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
 
         if #playlist == 0 then
             frame:addLabel():setText(("(empty)"):sub(1, w)):setPosition(1, contentTop):setForeground(colors.gray):setBackground(colors.black)
-            frame:addLabel():setText(("Add from Music Player"):sub(1, w)):setPosition(1, contentTop + 1):setForeground(colors.gray):setBackground(colors.black)
+            frame:addLabel():setText(emptyHint:sub(1, w)):setPosition(1, contentTop + 1):setForeground(colors.gray):setBackground(colors.black)
         else
             local removeW = 3
             local startIdx = (page - 1) * perPage + 1
@@ -472,7 +538,8 @@ local function playlistScreen(brainId, playlist)
                     frame:addButton():setText("X"):setPosition(w - removeW + 1, rowY):setSize(removeW, 1)
                         :setBackground(colors.red):setForeground(colors.white)
                         :onClick(function()
-                            local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", song.name)
+                            local ok, reason, _, newPlaylist, newVideoPlaylist = send(brainId, removeAction, song.name)
+                            if isVideo then newPlaylist = newVideoPlaylist end
                             if ok then playlist = newPlaylist or playlist draw()
                             else flash("Rejected: " .. tostring(reason), false) draw() end
                         end)
@@ -494,11 +561,13 @@ local function playlistScreen(brainId, playlist)
             :setForeground(#playlist > 0 and colors.black or colors.lightGray)
             :onClick(function()
                 if #playlist == 0 then return end
-                local ok, reason, status = send(brainId, "play_playlist")
+                local ok, reason, status = send(brainId, playAction)
                 if ok then
                     basalt.stop()
-                    transportScreen(brainId, "music", (status and status.name) or "Playlist", status)
-                    local _, _, _, newPlaylist = send(brainId, "get_status")
+                    transportScreen(brainId, isVideo and "video" or "music",
+                        (status and status.name) or heading, status)
+                    local _, _, _, newPlaylist, newVideoPlaylist = send(brainId, "get_status")
+                    if isVideo then newPlaylist = newVideoPlaylist end
                     playlist = newPlaylist or playlist
                     draw()
                     basalt.run()
@@ -542,10 +611,10 @@ while true do
     -- Whole block (title + 5 buttons) centered vertically as one unit
     -- rather than pinned to the top with all the empty space dumped at
     -- the bottom.
-    local BLOCK_HEIGHT = 12 -- title(1) gap(2) 5 buttons w/ 1-row gaps (9)
+    local BLOCK_HEIGHT = 14 -- title(1) gap(2) 6 buttons w/ 1-row gaps (11)
     local blockTop = math.max(1, math.floor((h - BLOCK_HEIGHT) / 2) + 1)
     local titleY = blockTop
-    local btnY = { blockTop + 3, blockTop + 5, blockTop + 7, blockTop + 9, blockTop + 11 }
+    local btnY = { blockTop + 3, blockTop + 5, blockTop + 7, blockTop + 9, blockTop + 11, blockTop + 13 }
 
     frame:addLabel():setText(config.TITLE:sub(1, w))
         :setPosition(math.max(1, math.floor((w - math.min(#config.TITLE, w)) / 2) + 1), titleY)
@@ -557,13 +626,17 @@ while true do
     frame:addButton():setText("Music Player"):setPosition(bx, btnY[2]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "music" basalt.stop() end)
-    frame:addButton():setText("Playlist"):setPosition(bx, btnY[3]):setSize(buttonW, 1)
+    -- "Playlist" was ambiguous the moment videos got one of their own.
+    frame:addButton():setText("Music Queue"):setPosition(bx, btnY[3]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "playlist" basalt.stop() end)
-    frame:addButton():setText("Now Playing"):setPosition(bx, btnY[4]):setSize(buttonW, 1)
+    frame:addButton():setText("Video Queue"):setPosition(bx, btnY[4]):setSize(buttonW, 1)
+        :setBackground(colors.gray):setForeground(colors.lime)
+        :onClick(function() chosen = "videoplaylist" basalt.stop() end)
+    frame:addButton():setText("Now Playing"):setPosition(bx, btnY[5]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "nowplaying" basalt.stop() end)
-    frame:addButton():setText("Quit"):setPosition(bx, btnY[5]):setSize(buttonW, 1)
+    frame:addButton():setText("Quit"):setPosition(bx, btnY[6]):setSize(buttonW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function() chosen = "quit" basalt.stop() end)
 
@@ -572,11 +645,36 @@ while true do
 
     if chosen == "video" then
         local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
-        local video = listScreen("VIDEOS", videos, function(v) return v.name end)
+        -- Fetched once so the "+" can show what is ALREADY queued; kept in
+        -- step locally as items are added, rather than a round trip per row.
+        local _, _, _, _, queue = send(brainId, "get_status")
+        local queued = {}
+        for _, item in ipairs(queue or {}) do queued[item.name] = true end
+
+        local video = listScreen("VIDEOS", videos,
+            function(v) return (v.subs and "[S] " or "") .. v.name end,
+            function(v)
+                local action = queued[v.name] and "video_playlist_remove" or "video_playlist_add"
+                local ok, reason = send(brainId, action, v.name)
+                if ok then queued[v.name] = not queued[v.name]
+                else flash("Rejected: " .. tostring(reason), false) end
+            end,
+            function(v) return not v.__films end,
+            function(v) return queued[v.name] and "-" or "+" end)
         if video then
-            local ok, reason, status = send(brainId, "play_video", video.name)
-            if ok then transportScreen(brainId, "video", video.name, status)
-            else flash("Rejected: " .. tostring(reason), false) end
+            -- Asked on the remote, then carried to the brain with the play
+            -- command -- whoever started playback is who gets asked.
+            local subtitles = nil
+            local go = true
+            if type(video.subs) == "string" and video.subs ~= "" then
+                subtitles = askSubtitles(video)
+                go = subtitles ~= nil
+            end
+            if go then
+                local ok, reason, status = send(brainId, "play_video", video.name, { subtitles = subtitles })
+                if ok then transportScreen(brainId, "video", video.name, status)
+                else flash("Rejected: " .. tostring(reason), false) end
+            end
         end
     elseif chosen == "music" then
         local songs = fetchMergedManifest(config.MUSIC_LIBRARIES, "songs.json")
@@ -591,7 +689,11 @@ while true do
         end
     elseif chosen == "playlist" then
         local ok, reason, _, playlist = send(brainId, "get_status")
-        if ok then playlistScreen(brainId, playlist or {})
+        if ok then playlistScreen(brainId, playlist or {}, "music")
+        else flash("Rejected: " .. tostring(reason), false) end
+    elseif chosen == "videoplaylist" then
+        local ok, reason, _, _, videoPlaylist = send(brainId, "get_status")
+        if ok then playlistScreen(brainId, videoPlaylist or {}, "video")
         else flash("Rejected: " .. tostring(reason), false) end
     elseif chosen == "nowplaying" then
         -- Checks what's ACTUALLY playing right now (could've been started

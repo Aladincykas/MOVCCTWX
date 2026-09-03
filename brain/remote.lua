@@ -22,8 +22,9 @@
 -- already has the full song table from its own manifest fetch, so it
 -- sends that directly instead of making the brain re-fetch/re-look-up).
 --
--- get_status, playlist_add and playlist_remove are all "reads/local
--- mutations", not commands -- handled entirely INLINE below, never turned
+-- get_status, playlist_add/playlist_remove and their video_ equivalents are
+-- all "reads/local mutations", not commands -- handled entirely INLINE below,
+-- never turned
 -- into a movcctwx_remote_action event, because they don't need to
 -- interrupt or navigate whatever screen is currently showing (unlike
 -- play_video/play_music/play_playlist, which do, and go through the
@@ -45,7 +46,11 @@
 
 local M = {}
 
-local NO_NAVIGATE_ACTIONS = { get_status = true, playlist_add = true, playlist_remove = true }
+local NO_NAVIGATE_ACTIONS = {
+    get_status = true,
+    playlist_add = true, playlist_remove = true,
+    video_playlist_add = true, video_playlist_remove = true,
+}
 
 local function handlePlaylistAdd(song)
     if type(song) ~= "table" or not song.name then return end
@@ -54,6 +59,29 @@ local function handlePlaylistAdd(song)
     end
     table.insert(_G.MOVCCTWX_PLAYLIST, song)
     _G.MOVCCTWX_SAVE_PLAYLIST()
+end
+
+-- The video queue holds NAMES only, never manifest entries -- a film's entry
+-- is a couple of hundred chunk URLs, and this table is persisted to disk and
+-- attached to every ack. startup.lua resolves a name against the library when
+-- it actually comes to play it.
+local function handleVideoPlaylistAdd(name)
+    if type(name) ~= "string" or name == "" then return end
+    for _, existing in ipairs(_G.MOVCCTWX_VIDEO_PLAYLIST) do
+        if existing.name == name then return end
+    end
+    table.insert(_G.MOVCCTWX_VIDEO_PLAYLIST, { name = name })
+    _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+end
+
+local function handleVideoPlaylistRemove(name)
+    for i, existing in ipairs(_G.MOVCCTWX_VIDEO_PLAYLIST) do
+        if existing.name == name then
+            table.remove(_G.MOVCCTWX_VIDEO_PLAYLIST, i)
+            _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+            return
+        end
+    end
 end
 
 local function handlePlaylistRemove(name)
@@ -98,10 +126,23 @@ function M.listen(config)
                     handlePlaylistAdd(message.song)
                 elseif message.action == "playlist_remove" then
                     handlePlaylistRemove(message.name)
+                elseif message.action == "video_playlist_add" then
+                    handleVideoPlaylistAdd(message.name)
+                elseif message.action == "video_playlist_remove" then
+                    handleVideoPlaylistRemove(message.name)
                 elseif not NO_NAVIGATE_ACTIONS[message.action] then
-                    os.queueEvent("movcctwx_remote_action", message.action, message.name)
+                    -- Third argument is a per-command option -- currently only
+                    -- play_video's subtitle answer, which has to survive the
+                    -- trip because the pocket asks the question and the brain
+                    -- is what acts on it.
+                    os.queueEvent("movcctwx_remote_action", message.action, message.name, message.subtitles)
                 end
-                rednet.send(senderId, { ok = true, status = _G.MOVCCTWX_STATUS, playlist = _G.MOVCCTWX_PLAYLIST }, config.REMOTE_PROTOCOL)
+                rednet.send(senderId, {
+                    ok = true,
+                    status = _G.MOVCCTWX_STATUS,
+                    playlist = _G.MOVCCTWX_PLAYLIST,
+                    videoPlaylist = _G.MOVCCTWX_VIDEO_PLAYLIST,
+                }, config.REMOTE_PROTOCOL)
             else
                 -- Not on the allowlist -- reject, and print the ID so the
                 -- owner can add it to config.lua's REMOTE_ALLOWLIST without

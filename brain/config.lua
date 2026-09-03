@@ -19,13 +19,22 @@ return {
     -- clip -- keeping them apart means a movie repo can be deleted outright
     -- to reclaim the space (deleting FILES reclaims nothing; every chunk is
     -- a commit and git keeps history) without taking the clips with it.
+    -- `films = true` marks a repo as holding features and series rather than
+    -- clips. Everything still merges into ONE browsable list; the flag only
+    -- decides what the menus offer for an entry:
+    --   * a film is never addable to the video playlist -- queueing two
+    --     hour-long features back to back is not a thing anyone wants, and
+    --     it would make the queue unreadable
+    --   * the playlist's "add" screen only ever lists non-films
+    -- Subtitles are NOT gated on this: that prompt appears whenever an entry
+    -- actually has a subtitle file, whichever repo it came from.
     VIDEO_LIBRARIES = {
         { label = "Didziulis ekranas 1", repo = "MOVCCTW2", branch = "main" },
         { label = "Didziulis ekranas 2", repo = "MOVCCTW1", branch = "main" },
-        { label = "Didziulis ekranas - MOVIES ONLY 1", repo = "MOVCCTW3", branch = "main" },
-        { label = "Didziulis ekranas - MOVIES ONLY 2", repo = "MOVCCTW4", branch = "main" },
+        { label = "Didziulis ekranas - MOVIES ONLY 1", repo = "MOVCCTW3", branch = "main", films = true },
+        { label = "Didziulis ekranas - MOVIES ONLY 2", repo = "MOVCCTW4", branch = "main", films = true },
         { label = "Didziulis ekranas 3", repo = "MOVCCTW5", branch = "main" },
-        { label = "Didziulis ekranas - MOVIES ONLY 3", repo = "MOVCCTW6", branch = "main" },
+        { label = "Didziulis ekranas - MOVIES ONLY 3", repo = "MOVCCTW6", branch = "main", films = true },
     },
 
     -- The 4x3 monitor wall. Row-major, left-to-right then top-to-bottom,
