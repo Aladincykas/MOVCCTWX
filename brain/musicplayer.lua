@@ -315,17 +315,6 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         local function drawNowPlaying()
             clearFrameChildren(frame)
 
-            -- Re-measure the screen fresh for THIS song, don't reuse the
-            -- w/h captured once back when M.run() started (possibly many
-            -- songs ago). If the terminal's actual size ever changes
-            -- mid-session (GUI scale, window resize) and layout keeps
-            -- using the old numbers, later songs can position controls
-            -- below the screen's real current height -- they'd exist,
-            -- just off-screen, which reads as "buttons vanished after
-            -- another song played". Re-measuring every song closes that
-            -- gap regardless of what changed the size.
-            w, h = mon.getSize()
-
             f:addLabel()
                 :setText((" NOW PLAYING "):sub(1, w))
                 :setSize(w, 1)
@@ -603,6 +592,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 centerLabel(statusLabel, statusY, "ERROR: " .. tostring(err))
                 sleep(1.5)
                 state.stopRequested = true
+                os.queueEvent("music_control") -- see the natural-end path's comment on why this matters
                 basalt.stop()
                 return
             end
@@ -670,6 +660,18 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             -- idle-watcher and this file's own idle-watcher generation
             -- counter).
             state.stopRequested = true
+            -- Also queue "music_control" here, same as the explicit
+            -- stop/pause paths do -- waitTick() (used by the wall-viz and
+            -- status-tick coroutines) only wakes up EARLY when it hears
+            -- this event; without it here, a NATURAL song end (nobody
+            -- pressed Stop -- the common case during playlist
+            -- auto-advance) left those coroutines to notice
+            -- stopRequested only on their next slow regular timer tick,
+            -- same race as before just for a different trigger. Missing
+            -- this was the actual remaining cause of controls/playlist
+            -- sidebar occasionally rendering wrong right after a playlist
+            -- song finished on its own and the next one started.
+            os.queueEvent("music_control")
             basalt.stop()
         end)
 
