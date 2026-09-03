@@ -266,12 +266,17 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
 
         -- Reassigned by drawNowPlaying() -- read by the status-tick loop
         -- below (playPauseBtn's text) and the remote handler above it.
+        -- centerWidth is also set there (the left portion of the screen,
+        -- once the playlist sidebar claims the right side) -- falls back
+        -- to the full width until drawNowPlaying() has run once.
         local nameLabel, statusLabel, volLabel, playPauseBtn, statusY
+        local centerWidth = w
 
         local function centerLabel(label, y, text, color)
+            text = text:sub(1, centerWidth)
             label:setText(text)
             if color then label:setForeground(color) end
-            label:setPosition(math.max(1, math.floor((w - #text) / 2) + 1), y)
+            label:setPosition(math.max(1, math.floor((centerWidth - #text) / 2) + 1), y)
         end
 
         -- Volume persists across songs/sessions (a saved settings file, not
@@ -325,7 +330,32 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             local btnRow2Y = btnRow1Y + 2
             local btnRow3Y = btnRow2Y + 2
             local btnRow4Y = btnRow3Y + 2
-            local bx = math.max(1, math.floor((w - (buttonW * 2 + 2)) / 2) + 1)
+
+            -- Playlist sidebar on the right, in whatever room is left over
+            -- once the controls (centered within the LEFT portion now,
+            -- not the full width) are laid out -- only on a screen wide
+            -- enough for it to be readable (>=8 cols); a narrow screen
+            -- just skips it rather than cramming in unreadable text.
+            local leftW = math.max(buttonW * 2 + 4, math.floor(w * 0.62))
+            local rightX = leftW + 2
+            local rightW = w - rightX + 1
+            local showPlaylist = rightW >= 8
+            local bx = math.max(1, math.floor((leftW - (buttonW * 2 + 2)) / 2) + 1)
+            centerWidth = showPlaylist and leftW or w
+
+            if showPlaylist then
+                f:addLabel():setText(("PLAYLIST (%d)"):format(#playlist):sub(1, rightW))
+                    :setPosition(rightX, 1):setForeground(colors.lime):setBackground(colors.black)
+                if #playlist == 0 then
+                    f:addLabel():setText(("(empty)"):sub(1, rightW))
+                        :setPosition(rightX, 3):setForeground(colors.gray):setBackground(colors.black)
+                else
+                    for i = 1, math.min(#playlist, h - 3) do
+                        f:addLabel():setText(playlist[i].name:sub(1, rightW))
+                            :setPosition(rightX, 2 + i):setForeground(colors.white):setBackground(colors.black)
+                    end
+                end
+            end
 
             nameLabel = f:addLabel():setForeground(colors.white):setBackground(colors.black)
             centerLabel(nameLabel, nameY, song.name:sub(1, w - 2))
