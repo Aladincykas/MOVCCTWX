@@ -118,10 +118,53 @@ end
 -- onAdd: optional -- if given, each row gets a small "+" button next to
 -- it (playlist_add) alongside the row's own "play this" button, and a
 -- Back button (not Prev/Next/+) closes the screen.
+-- Each entry gets TWO rows instead of one.
+--
+-- A pocket screen is 26 characters wide and video names routinely run past
+-- that, so a single row could only ever show the first two thirds of a title
+-- -- "My life be like -- Tokyo D" tells you nothing about which Tokyo Drift
+-- video it is, and two similarly-named entries truncate to the same text.
+-- Splitting on a space where possible keeps whole words together.
+--
+-- The cost is half as many entries per page, which is why the page counter
+-- and the arrows already exist.
+local ROWS_PER_ITEM = 2
+
+-- Splits `text` across at most ROWS_PER_ITEM lines of `width`, breaking at a
+-- space rather than mid-word where one is available near the break.
+local function wrapLabel(text, width)
+    local lines = {}
+    local rest = text
+    for _ = 1, ROWS_PER_ITEM do
+        if #rest <= width then
+            if #rest > 0 then lines[#lines + 1] = rest end
+            rest = ""
+            break
+        end
+        -- Look for a space in the last third of the line: nearer than that
+        -- and breaking there wastes more space than the tidy break is worth.
+        local cut = nil
+        for i = width, math.floor(width * 0.6), -1 do
+            if rest:sub(i, i) == " " then cut = i break end
+        end
+        cut = cut or width
+        lines[#lines + 1] = rest:sub(1, cut):gsub("%s+$", "")
+        rest = rest:sub(cut + 1):gsub("^%s+", "")
+    end
+    -- Anything still left over genuinely does not fit; mark it rather than
+    -- cutting silently, so a truncated name is never mistaken for the
+    -- whole one.
+    if #rest > 0 and #lines > 0 then
+        local last = lines[#lines]
+        lines[#lines] = last:sub(1, math.max(1, width - 3)) .. "..."
+    end
+    return lines
+end
+
 local function listScreen(title, items, labelFn, onAdd)
     local contentTop = 3
     local footerRow = h
-    local perPage = math.max(1, footerRow - contentTop - 1)
+    local perPage = math.max(1, math.floor((footerRow - contentTop - 1) / ROWS_PER_ITEM))
     local page = 1
     local result = nil
 
@@ -143,19 +186,36 @@ local function listScreen(title, items, labelFn, onAdd)
             local idx = startIdx + i
             local item = items[idx]
             if item then
-                local rowY = contentTop + i
-                frame:addButton()
-                    :setText(labelFn(item):sub(1, w - addW - 1))
+                local rowY = contentTop + i * ROWS_PER_ITEM
+                local lines = wrapLabel(labelFn(item), w - addW - 1)
+                -- One button spanning both rows, so tapping either line picks
+                -- the item -- two separate buttons would leave the second
+                -- line looking clickable but dead.
+                local btn = frame:addButton()
                     :setPosition(1, rowY)
-                    :setSize(w - addW, 1)
+                    :setSize(w - addW, ROWS_PER_ITEM)
                     :setBackground(colors.gray)
                     :setForeground(colors.lime)
                     :onClick(function() result = item basalt.stop() end)
+                btn:setText(lines[1] or "")
+                -- Basalt centres a multi-row button's single text line, so
+                -- the second line is drawn as its own label on top of the
+                -- button's background rather than fighting that layout.
+                if lines[2] then
+                    btn:setSize(w - addW, 1)
+                    frame:addButton()
+                        :setText(lines[2])
+                        :setPosition(1, rowY + 1)
+                        :setSize(w - addW, 1)
+                        :setBackground(colors.gray)
+                        :setForeground(colors.lime)
+                        :onClick(function() result = item basalt.stop() end)
+                end
                 if onAdd then
                     frame:addButton()
                         :setText("+")
                         :setPosition(w - addW + 1, rowY)
-                        :setSize(addW, 1)
+                        :setSize(addW, ROWS_PER_ITEM)
                         :setBackground(colors.lime)
                         :setForeground(colors.black)
                         :onClick(function() onAdd(item) draw() end)
