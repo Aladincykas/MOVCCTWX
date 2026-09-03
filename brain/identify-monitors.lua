@@ -77,6 +77,36 @@ for i, name in ipairs(monitors) do
         :format(i, name, w1, h1, scale))
 end
 
+-- Every text scale CC:Tweaked actually allows (multiples of 0.5, 0.5-5.0)
+-- and what each one gives you across the WHOLE 4x3 wall. This is the table
+-- to read before re-encoding video: a video has to be encoded at exactly
+-- the wall's character size for the chosen scale, and cell count is what
+-- decides .32vid file size (that format stores every frame independently
+-- at a flat ~1.3 bytes per cell -- measured, not assumed -- so bytes scale
+-- linearly with cells x fps and nothing else).
+--
+-- Sizes are read back from the hardware rather than divided out of the
+-- scale-1.0 figure, because CC floors the division and subtracts monitor
+-- border pixels: the true size at 1.5 is NOT the scale-1.0 size / 1.5.
+do
+    local probe = peripheral.wrap(monitors[1])
+    local cols, rows = 4, 3
+    print("\n" .. "Wall size by text scale (" .. cols .. "x" .. rows .. " grid):")
+    print("scale   per monitor    whole wall     cells")
+    local scale = 0.5
+    while scale <= 5.0 do
+        probe.setTextScale(scale)
+        local mw, mh = probe.getSize()
+        local ww, wh = mw * cols, mh * rows
+        print(("%.1f     %3dx%-3d        %4dx%-4d     %d")
+            :format(scale, mw, mh, ww, wh, ww * wh))
+        scale = scale + 0.5
+    end
+    -- Put it back where the rest of this script expects it, so the probe
+    -- monitor keeps showing its label at the scale chosen for it above.
+    probe.setTextScale(1.0)
+end
+
 print("\nEach monitor now shows its own peripheral name in big text --")
 print("stand in front of the wall and read off the name on each one, in")
 print("physical order (left-to-right, top-to-bottom, 4 across x 3 down).")
