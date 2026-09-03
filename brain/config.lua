@@ -36,12 +36,12 @@ return {
 
     -- rednet protocol string shared with the pocket computer(s).
     REMOTE_PROTOCOL = "movcctwx-remote",
-    -- Computer IDs allowed to send remote commands. Test setup: owner only.
-    -- Add friends' pocket computer IDs here later (os.getComputerID() on
-    -- their end) -- this stays a list on purpose so that's a config change,
-    -- not a code change.
+    -- Computer IDs allowed to send remote commands. Test setup: owner only
+    -- (computer #2789, the owner's pocket computer). Add friends' pocket
+    -- computer IDs here later (os.getComputerID() on their end) -- this
+    -- stays a list on purpose so that's a config change, not a code change.
     REMOTE_ALLOWLIST = {
-        -- 0,
+        2789,
     },
 
     MENU_MUSIC_VOLUME = 0.5,
