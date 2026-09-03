@@ -423,13 +423,22 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 style.init(wallW, wallH)
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
-                -- 0.1s (10fps, same redraw rate videoplayer.lua already
-                -- uses for actual video on this same wall) -- 0.3s read as
-                -- sluggish/barely-moving in-game.
+                -- 0.15s (~7fps). CC's Lua is single-threaded -- this
+                -- coroutine, the DFPWM streaming loop, and the speaker
+                -- dispatcher all take turns on the same CPU budget between
+                -- yields. 0.1s (10fps, matching video) made plasma/
+                -- starfield's real per-cell trig math run often enough to
+                -- risk delaying the audio coroutine's turn -- reported
+                -- in-game as audio jumping/stuttering during playback.
+                -- This is a middle ground between that and the original
+                -- 0.3s, which read as too sluggish -- revisit if jumping
+                -- is still happening (bars/wave are much cheaper per-cell
+                -- than plasma/starfield, so this may need to vary by
+                -- style rather than one fixed rate for all of them).
                 while not state.stopRequested do
                     style.step(wallW, wallH, state.paused)
                     if not state.paused then style.draw(wall, wallW, wallH) end
-                    sleep(0.1)
+                    sleep(0.15)
                 end
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
