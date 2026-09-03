@@ -16,6 +16,7 @@
 local config = require("config")
 local basalt = require("basalt")
 local remote = require("remote")
+local settings = require("settings")
 
 term.clear()
 term.setCursorPos(1, 1)
@@ -36,13 +37,31 @@ _G.MOVCCTWX_TERMINATED = false
 -- and musicplayer.lua update this continuously while something's playing
 -- (see their comments); everywhere else it's just {screen=...}.
 _G.MOVCCTWX_STATUS = { screen = "menu" }
--- The playlist: a shared, program-lifetime table (not scoped to one Music
--- session, unlike the old version) -- both the computer's own Playlist
--- screen (musicplayer.lua) and remote playlist_add/playlist_remove
--- commands (remote.lua) mutate this SAME table in place, so either side
--- adding/removing a song is immediately visible to the other. Each entry
--- is a full song table ({name=, url=...}), same shape as songs.json.
-_G.MOVCCTWX_PLAYLIST = {}
+-- The playlist: a shared table (not scoped to one Music session, unlike
+-- the old version) -- both the computer's own Playlist screen
+-- (musicplayer.lua) and remote playlist_add/playlist_remove commands
+-- (remote.lua) mutate this SAME table in place, so either side adding/
+-- removing a song is immediately visible to the other. Each entry is a
+-- full song table ({name=, url=...}), same shape as songs.json.
+--
+-- Persisted to disk (piggybacking on settings.lua's existing JSON store,
+-- alongside the saved volume levels), not just kept in memory -- it used
+-- to reset to empty on every single reboot, silently losing whatever had
+-- been added, confirmed in-game as a real problem during a session with
+-- many reinstall-triggered reboots. _G.MOVCCTWX_SAVE_PLAYLIST is called
+-- by both mutation sites (remote.lua and musicplayer.lua's own Playlist
+-- screen) after every add/remove -- re-reads the settings file fresh each
+-- time rather than caching it, so this can't clobber a volume level saved
+-- by the OTHER file in between.
+do
+    local saved = settings.load()
+    _G.MOVCCTWX_PLAYLIST = (type(saved.playlist) == "table") and saved.playlist or {}
+end
+function _G.MOVCCTWX_SAVE_PLAYLIST()
+    local saved = settings.load()
+    saved.playlist = _G.MOVCCTWX_PLAYLIST
+    settings.save(saved)
+end
 
 local frame = basalt.createFrame()
 frame:setBackground(colors.black)

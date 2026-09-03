@@ -53,12 +53,14 @@ local function handlePlaylistAdd(song)
         if existing.name == song.name then return end -- already on the playlist
     end
     table.insert(_G.MOVCCTWX_PLAYLIST, song)
+    _G.MOVCCTWX_SAVE_PLAYLIST()
 end
 
 local function handlePlaylistRemove(name)
     for i, existing in ipairs(_G.MOVCCTWX_PLAYLIST) do
         if existing.name == name then
             table.remove(_G.MOVCCTWX_PLAYLIST, i)
+            _G.MOVCCTWX_SAVE_PLAYLIST()
             return
         end
     end

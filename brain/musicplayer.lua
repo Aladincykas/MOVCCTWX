@@ -948,6 +948,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                     :setForeground(colors.white)
                     :onClick(function()
                         table.remove(playlist, idx)
+                        _G.MOVCCTWX_SAVE_PLAYLIST()
                         drawPlaylist()
                     end)
             end
@@ -1055,6 +1056,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                         :setForeground(colors.lime)
                         :onClick(function()
                             table.insert(playlist, song)
+                            _G.MOVCCTWX_SAVE_PLAYLIST()
                             drawAddSongs() -- redraw in place -- the counter above updates, stays on this screen
                         end)
                 end
