@@ -555,9 +555,17 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 -- fine at one scale is far too aggressive at the other.
                 -- Backing off automatically means changing the scale
                 -- doesn't silently reintroduce audio stutter.
+                -- Thresholds are set so the ACTUAL wall (4x3 monitors at
+                -- scale 1.0 = 324x120 = 38,880 cells) lands in the fast
+                -- 0.15s tier -- that's the rate it ran at before this
+                -- adaptive logic existed, and it looked right. An earlier
+                -- version put 38,880 in a 0.25s tier, which visibly turned
+                -- the visuals into a slideshow for no reason. Only a much
+                -- bigger wall (e.g. scale 0.5, which quadruples the cells
+                -- to 155,520) actually needs to back off.
                 local cells = wallW * wallH
-                local frameInterval = (cells <= 20000 and 0.15)
-                    or (cells <= 60000 and 0.25)
+                local frameInterval = (cells <= 50000 and 0.15)
+                    or (cells <= 120000 and 0.25)
                     or 0.4
                 while not state.stopRequested do
                     if not state.paused and os.epoch("utc") >= nextSwitchMs then
