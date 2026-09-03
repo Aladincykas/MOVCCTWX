@@ -542,6 +542,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 wall.clear()
                 wallviz.resetCache() -- the clear wiped every row; see resetCache
                 local nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
+                local lastFrameMs = os.epoch("utc")
 
                 -- Redraw interval scales with how big the wall actually
                 -- is, instead of one fixed rate. CC's Lua is
@@ -555,18 +556,22 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 -- fine at one scale is far too aggressive at the other.
                 -- Backing off automatically means changing the scale
                 -- doesn't silently reintroduce audio stutter.
-                -- Thresholds are set so the ACTUAL wall (4x3 monitors at
-                -- scale 1.0 = 324x120 = 38,880 cells) lands in the fast
-                -- 0.15s tier -- that's the rate it ran at before this
-                -- adaptive logic existed, and it looked right. An earlier
-                -- version put 38,880 in a 0.25s tier, which visibly turned
-                -- the visuals into a slideshow for no reason. Only a much
-                -- bigger wall (e.g. scale 0.5, which quadruples the cells
-                -- to 155,520) actually needs to back off.
+                -- The actual wall (4x3 monitors at scale 1.0 = 324x120 =
+                -- 38,880 cells) gets the fastest tier. 0.1s is affordable
+                -- now that rows are diffed (unchanged rows cost nothing)
+                -- and the audio decodes a chunk ahead, so the visuals no
+                -- longer have to be starved to keep sound clean. Only a
+                -- much bigger wall (scale 0.5 quadruples this to 155,520)
+                -- needs to back off.
+                --
+                -- The styles animate by REAL TIME (they're handed dt
+                -- below), not by a fixed step per frame, so changing these
+                -- numbers changes smoothness without changing how fast the
+                -- animation actually moves.
                 local cells = wallW * wallH
-                local frameInterval = (cells <= 50000 and 0.15)
-                    or (cells <= 120000 and 0.25)
-                    or 0.4
+                local frameInterval = (cells <= 50000 and 0.1)
+                    or (cells <= 120000 and 0.2)
+                    or 0.35
                 while not state.stopRequested do
                     if not state.paused and os.epoch("utc") >= nextSwitchMs then
                         styleIndex = styleIndex + 1
@@ -577,7 +582,15 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                         wallviz.resetCache() -- the clear wiped every row; see resetCache
                         nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
                     end
-                    style.step(wallW, wallH, state.paused)
+                    -- Real elapsed time since the last frame, not the
+                    -- nominal interval -- if a frame took longer than
+                    -- planned (busy tick), the animation advances by the
+                    -- time that actually passed instead of stuttering.
+                    local nowMs = os.epoch("utc")
+                    local dt = math.min(0.5, (nowMs - lastFrameMs) / 1000)
+                    lastFrameMs = nowMs
+
+                    style.step(wallW, wallH, state.paused, dt)
                     if not state.paused then style.draw(wall, wallW, wallH) end
                     -- waitTick, not plain sleep() -- see its own comment
                     -- for why: this coroutine needs to notice

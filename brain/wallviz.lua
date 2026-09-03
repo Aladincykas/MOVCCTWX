@@ -80,9 +80,11 @@ local function newBarsStyle()
             heights = {}
             for c = 1, cols do heights[c] = math.random(0, rows) end
         end,
-        step = function(cols, rows, paused)
+        step = function(cols, rows, paused, dt)
             if paused then return end
-            local maxStep = math.max(1, math.floor(rows * 0.2))
+            -- Scaled by dt like the others, so the bars wobble at the same
+            -- rate regardless of how often we're redrawing.
+            local maxStep = math.max(1, math.floor(rows * 0.2 * (dt / 0.15)))
             for c = 1, cols do
                 local h2 = (heights[c] or 0) + math.random(-maxStep, maxStep)
                 heights[c] = math.max(0, math.min(rows, h2))
@@ -105,8 +107,8 @@ local function newWaveStyle()
     local LINES = { { freq = 1.5, offset = 0, band = 0.2 }, { freq = 2, offset = 2.5, band = 0.6 }, { freq = 1, offset = 5, band = 0.9 } }
     return {
         init = function() phase = math.random() * 10 end,
-        step = function(cols, rows, paused)
-            if not paused then phase = phase + 0.2 end
+        step = function(cols, rows, paused, dt)
+            if not paused then phase = phase + 1.33 * dt end
         end,
         draw = function(wall, cols, rows)
             local mid = rows / 2
@@ -151,8 +153,8 @@ local function newPlasmaStyle(freqs, speeds)
     local t
     return {
         init = function() t = math.random() * 20 end,
-        step = function(cols, rows, paused)
-            if not paused then t = t + 0.12 end
+        step = function(cols, rows, paused, dt)
+            if not paused then t = t + 0.8 * dt end
         end,
         draw = function(wall, cols, rows)
             local xSin, diagSinX, diagCosX = {}, {}, {}
