@@ -191,7 +191,17 @@ local function transportScreen(brainId, kind, name, initialStatus)
     end
 
     local function updateLabels()
-        centerLabel(nameLabel, 3, name)
+        -- Prefer status.name (the brain's live, ACTUAL current title --
+        -- e.g. once play_playlist starts really playing something) over
+        -- the static `name` this screen was opened with -- that static
+        -- value is sometimes just a placeholder like "Playlist" (the ack
+        -- for play_playlist can arrive before _G.MOVCCTWX_STATUS on the
+        -- brain has caught up to the real song), and it never updates on
+        -- its own as the playlist auto-advances to a DIFFERENT song
+        -- underneath. Confirmed in-game: title was stuck on "Playlist"
+        -- for the whole session instead of following the actual song.
+        local displayName = (status and status.screen == kind and status.name) or name
+        centerLabel(nameLabel, 3, displayName)
         if status and status.screen == kind then
             centerLabel(statusLabel, 4, (status.paused and "|| " or "> ") .. formatTime(status.elapsedSec)
                 .. "  " .. (status.volumePct or 0) .. "%")
@@ -346,7 +356,12 @@ end
 
 -- ==== Main ====
 openModem()
-flash("Looking for " .. config.TITLE .. "...", true)
+-- Was "Looking for " .. config.TITLE (config.TITLE is THIS pocket's OWN
+-- name, "MOVCCTWX Remote" -- wrong thing to say here, it's the BRAIN
+-- being searched for, not itself) -- also overflowed the 26-col screen
+-- and got truncated mid-word ("...Remot"). Fixed wording, and short
+-- enough to never need truncating regardless of screen width.
+flash("Finding brain computer...", true)
 local brainId = findBrain()
 if not brainId then
     flash("Brain computer not found", false)
