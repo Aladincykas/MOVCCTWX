@@ -183,9 +183,20 @@ function M.play(wall, screen, speakers, entry, config)
 
                 -- Controls redraw at ~2Hz, not every video frame -- the
                 -- computer's own screen isn't the thing being paced to fps.
+                -- _G.MOVCCTWX_STATUS is read by remote.lua and attached to
+                -- every rednet ack it sends, so the pocket computer's
+                -- transport screen can show live title/paused/elapsed/
+                -- volume without a separate round trip.
                 local now = os.epoch("utc")
                 if now - lastControlsDraw > 500 then
                     drawControls(screen, state, entry, entry.durationSec or 0)
+                    _G.MOVCCTWX_STATUS = {
+                        screen = "video",
+                        name = entry.name,
+                        paused = state.paused,
+                        elapsedSec = state.elapsedSec,
+                        volumePct = math.floor(state.volume / state.maxVolume * 100 + 0.5),
+                    }
                     lastControlsDraw = now
                 end
 

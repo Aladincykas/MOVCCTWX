@@ -30,6 +30,12 @@ if #speakers == 0 then
 end
 
 _G.MOVCCTWX_TERMINATED = false
+-- Live playback status, read by remote.lua and attached to every rednet
+-- ack it sends -- lets the pocket computer show a real title/
+-- paused-or-playing/elapsed/volume instead of static text. videoplayer.lua
+-- and musicplayer.lua update this continuously while something's playing
+-- (see their comments); everywhere else it's just {screen=...}.
+_G.MOVCCTWX_STATUS = { screen = "menu" }
 
 local frame = basalt.createFrame()
 frame:setBackground(colors.black)
@@ -244,20 +250,26 @@ local function mainLoop()
                     for _, v in ipairs(videos) do if v.name == screen.name then match = v end end
                     if match then videoplayer.play(getWall(), term, speakers, match, config) end
                 end
+                _G.MOVCCTWX_STATUS = { screen = "menu" }
                 screen = "menu"
             else
                 pendingSongName = screen.name
                 screen = "music"
             end
         elseif screen == "menu" then
+            _G.MOVCCTWX_STATUS = { screen = "menu" }
             screen = runMainMenu()
         elseif screen == "video" then
+            _G.MOVCCTWX_STATUS = { screen = "video_menu" }
             screen = runVideoMenu()
+            _G.MOVCCTWX_STATUS = { screen = "menu" }
         elseif screen == "music" then
             clearFrameChildren(frame)
+            _G.MOVCCTWX_STATUS = { screen = "music_menu" }
             local musicplayer = require("musicplayer")
             local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall())
             pendingSongName = nil
+            _G.MOVCCTWX_STATUS = { screen = "menu" }
             screen = (exitReason == "quit") and "quit" or "menu"
         elseif screen == "quit" or _G.MOVCCTWX_TERMINATED then
             break

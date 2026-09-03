@@ -28,7 +28,9 @@ local function findBrain()
 end
 
 -- Sends one command and waits briefly for the brain's ok/reject reply.
--- Returns true, nil on success; false, reason on rejection/timeout.
+-- Returns true, nil, status on success (status is the brain's current
+-- _G.MOVCCTWX_STATUS snapshot -- see remote.lua -- attached to every ack,
+-- not just get_status's); false, reason on rejection/timeout.
 local function send(brainId, action, name)
     rednet.send(brainId, { action = action, name = name }, config.REMOTE_PROTOCOL)
     local senderId, message = rednet.receive(config.REMOTE_PROTOCOL, 3)
@@ -38,7 +40,14 @@ local function send(brainId, action, name)
     if not message.ok then
         return false, message.reason or "rejected"
     end
-    return true
+    return true, nil, message.status
+end
+
+local function formatTime(seconds)
+    seconds = math.max(0, math.floor(seconds or 0))
+    local m = math.floor(seconds / 60)
+    local s = seconds % 60
+    return ("%d:%02d"):format(m, s)
 end
 
 local function fetchMergedManifest(libraries, manifestFile)
@@ -126,30 +135,60 @@ local function pickFromList(title, items, labelFn)
     end
 end
 
--- Now-playing transport screen: sends playpause/stop/volume commands.
+-- Now-playing transport screen: sends playpause/stop/volume commands, and
+-- polls the brain once a second for live status (title/paused/elapsed/
+-- volume) so this doesn't just sit there as static instructions -- every
+-- command's own response ALSO carries a fresh status snapshot (see
+-- send()), so the display updates immediately on a keypress too, not just
+-- on the next poll tick.
 -- Q returns to the list without stopping playback on the brain side.
-local function transportScreen(brainId, kind, name)
-    while true do
+-- initialStatus: the status snapshot from the play_video/play_music call
+-- that got us here, if any -- shown immediately instead of a blank first
+-- frame while waiting for the first poll.
+local function transportScreen(brainId, kind, name, initialStatus)
+    local status = initialStatus
+
+    local function draw()
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
         term.clear()
         centerText(2, kind == "video" and "DIDZIULIS EKRANAS" or "MUSIC", colors.lime)
         centerText(4, name:sub(1, term.getSize()), colors.white)
-        centerText(6, "space=play/pause  s=stop", colors.lightGray)
-        centerText(7, "left/right=volume  q=back", colors.lightGray)
-
-        local event, key = os.pullEvent("key")
-        local action = nil
-        if key == keys.space then action = "playpause"
-        elseif key == keys.s then action = "stop"
-        elseif key == keys.left then action = "vol-1"
-        elseif key == keys.right then action = "vol+1"
-        elseif key == keys.q then return
+        if status and status.screen == kind then
+            centerText(5, (status.paused and "|| PAUSED  " or "> PLAYING  ") .. formatTime(status.elapsedSec), colors.lightGray)
+            centerText(6, ("Volume: %d%%"):format(status.volumePct or 0), colors.lightGray)
+        else
+            centerText(5, "(connecting...)", colors.gray)
         end
-        if action then
-            local ok, reason = send(brainId, action)
-            if not ok then flash("Rejected: " .. tostring(reason), false) return end
-            if action == "stop" then return end
+        centerText(8, "space=play/pause  s=stop", colors.lightGray)
+        centerText(9, "left/right=volume  q=back", colors.lightGray)
+    end
+
+    draw()
+    local pollTimer = os.startTimer(1)
+    while true do
+        local event, p1 = os.pullEvent()
+
+        if event == "timer" and p1 == pollTimer then
+            local ok, _, newStatus = send(brainId, "get_status")
+            if ok then status = newStatus end
+            draw()
+            pollTimer = os.startTimer(1)
+        elseif event == "key" then
+            local action = nil
+            if p1 == keys.space then action = "playpause"
+            elseif p1 == keys.s then action = "stop"
+            elseif p1 == keys.left then action = "vol-1"
+            elseif p1 == keys.right then action = "vol+1"
+            elseif p1 == keys.q then return
+            end
+            if action then
+                local ok, reason, newStatus = send(brainId, action)
+                if not ok then flash("Rejected: " .. tostring(reason), false) return end
+                if action == "stop" then return end
+                status = newStatus
+                draw()
+            end
         end
     end
 end
@@ -177,16 +216,16 @@ while true do
         local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
         local video = pickFromList("VIDEOS", videos, function(v) return v.name end)
         if video then
-            local ok, reason = send(brainId, "play_video", video.name)
-            if ok then transportScreen(brainId, "video", video.name)
+            local ok, reason, status = send(brainId, "play_video", video.name)
+            if ok then transportScreen(brainId, "video", video.name, status)
             else flash("Rejected: " .. tostring(reason), false) end
         end
     elseif key == keys.two then
         local songs = fetchMergedManifest(config.MUSIC_LIBRARIES, "songs.json")
         local song = pickFromList("MUSIC", songs, function(s) return s.name end)
         if song then
-            local ok, reason = send(brainId, "play_music", song.name)
-            if ok then transportScreen(brainId, "music", song.name)
+            local ok, reason, status = send(brainId, "play_music", song.name)
+            if ok then transportScreen(brainId, "music", song.name, status)
             else flash("Rejected: " .. tostring(reason), false) end
         end
     elseif key == keys.q then

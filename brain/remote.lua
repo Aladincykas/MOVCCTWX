@@ -17,7 +17,14 @@
 -- screen happens to be active.
 --
 -- Expected message shape from the pocket computer: { action = "...", name
--- = "..." } (name only used by play_video/play_music).
+-- = "..." } (name only used by play_video/play_music). "get_status" is a
+-- special action: still allowlist-checked like everything else, but never
+-- turned into a movcctwx_remote_action event -- it's a read, not a
+-- command. Every ack (get_status's included) carries the CURRENT
+-- _G.MOVCCTWX_STATUS snapshot (kept up to date by videoplayer.lua and
+-- musicplayer.lua while something's playing -- see their comments), so a
+-- pocket computer can show live title/paused/elapsed/volume without a
+-- second round-trip after every command.
 --
 -- Run M.listen(config) as one branch of parallel.waitForAny/waitForAll
 -- alongside whatever menu/player loop is active -- it never returns on its
@@ -53,8 +60,10 @@ function M.listen(config)
         local senderId, message = rednet.receive(config.REMOTE_PROTOCOL)
         if type(message) == "table" and message.action then
             if isAllowed(config, senderId) then
-                os.queueEvent("movcctwx_remote_action", message.action, message.name)
-                rednet.send(senderId, { ok = true }, config.REMOTE_PROTOCOL)
+                if message.action ~= "get_status" then
+                    os.queueEvent("movcctwx_remote_action", message.action, message.name)
+                end
+                rednet.send(senderId, { ok = true, status = _G.MOVCCTWX_STATUS }, config.REMOTE_PROTOCOL)
             else
                 -- Not on the allowlist -- reject, and print the ID so the
                 -- owner can add it to config.lua's REMOTE_ALLOWLIST without

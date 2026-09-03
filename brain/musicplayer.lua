@@ -587,6 +587,18 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
                     (state.paused and "|| PAUSED  " or "> PLAYING  ") .. formatTime(state.elapsedMs / 1000))
                 if playPauseBtn then playPauseBtn:setText(state.paused and "Play" or "Pause") end
 
+                -- Read by remote.lua and attached to every rednet ack it
+                -- sends, so the pocket computer's transport screen can show
+                -- live title/paused/elapsed/volume without a separate
+                -- round trip.
+                _G.MOVCCTWX_STATUS = {
+                    screen = "music",
+                    name = song.name,
+                    paused = state.paused,
+                    elapsedSec = state.elapsedMs / 1000,
+                    volumePct = math.floor(state.volume / config.MAX_VOLUME * 100 + 0.5),
+                }
+
                 sleep(0.3)
             end
         end)
