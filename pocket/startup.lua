@@ -179,6 +179,7 @@ end
 local function transportScreen(brainId, kind, name, initialStatus)
     local status = initialStatus
     local nameLabel, statusLabel, playPauseBtn
+    local playlistHeader, playlistLabels = nil, {}
 
     -- Centers a label horizontally at row y, given its CURRENT text --
     -- called both at setup and every updateLabels() (the status line's
@@ -249,13 +250,48 @@ local function transportScreen(brainId, kind, name, initialStatus)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() basalt.stop() end)
 
+    -- Compact playlist view in the gap between the volume row and Back --
+    -- the computer's Now Playing screen has one, the pocket didn't have
+    -- ANYTHING playlist-related on this screen at all. Fixed set of label
+    -- widgets created once (rows 10..h-1), text-only updates on every
+    -- poll tick instead of recreating them -- avoids the same kind of
+    -- per-tick widget churn/redraw cost that caused the audio-jump issue
+    -- on the computer's wall visuals.
+    local plTop, plBottom = 10, h - 1
+    local plCapacity = math.max(0, plBottom - plTop)
+    if plCapacity > 0 then
+        playlistHeader = frame:addLabel():setPosition(1, plTop):setForeground(colors.lime):setBackground(colors.black)
+        for i = 1, plCapacity do
+            playlistLabels[i] = frame:addLabel():setPosition(1, plTop + i):setForeground(colors.white):setBackground(colors.black)
+        end
+    end
+
+    local function updatePlaylist(playlist)
+        if not playlistHeader then return end
+        playlist = playlist or {}
+        playlistHeader:setText(("Playlist (%d):"):format(#playlist):sub(1, w))
+        for i = 1, plCapacity do
+            local song = playlist[i]
+            if song then
+                playlistLabels[i]:setText(song.name:sub(1, w))
+            else
+                playlistLabels[i]:setText("")
+            end
+        end
+    end
+
     updateLabels()
+    updatePlaylist(nil)
 
     local stopped = false
     basalt.schedule(function()
         while not stopped do
-            local ok, _, newStatus = send(brainId, "get_status")
-            if ok then status = newStatus updateLabels() end
+            local ok, _, newStatus, newPlaylist = send(brainId, "get_status")
+            if ok then
+                status = newStatus
+                updateLabels()
+                updatePlaylist(newPlaylist)
+            end
             sleep(1)
         end
     end)

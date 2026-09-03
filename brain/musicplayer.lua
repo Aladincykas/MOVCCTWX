@@ -353,15 +353,36 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                         :setPosition(rightX, row):setBackground(colors.gray)
                 end
 
-                f:addLabel():setText((" PLAYLIST (%d) "):format(#playlist):sub(1, rightW)):setSize(rightW, 1)
-                    :setPosition(rightX, 1):setForeground(colors.lime):setBackground(colors.gray)
+                -- Text starts 1 column in from the panel's own left edge,
+                -- not flush against it -- was reading as "hugging the
+                -- wall" with zero left margin.
+                local textX, textW = rightX + 1, rightW - 1
+                f:addLabel():setText(("PLAYLIST (%d)"):format(#playlist):sub(1, textW)):setSize(textW, 1)
+                    :setPosition(textX, 1):setForeground(colors.lime):setBackground(colors.gray)
                 if #playlist == 0 then
-                    f:addLabel():setText(("(empty)"):sub(1, rightW)):setSize(rightW, 1)
-                        :setPosition(rightX, 3):setForeground(colors.lightGray):setBackground(colors.gray)
+                    f:addLabel():setText(("(empty)"):sub(1, textW)):setSize(textW, 1)
+                        :setPosition(textX, 3):setForeground(colors.lightGray):setBackground(colors.gray)
                 else
-                    for i = 1, math.min(#playlist, h - 3) do
-                        f:addLabel():setText(playlist[i].name:sub(1, rightW)):setSize(rightW, 1)
-                            :setPosition(rightX, 2 + i):setForeground(colors.white):setBackground(colors.gray)
+                    -- Rows 3..h-1 are available for entries (row 1 is the
+                    -- header, row h is left as breathing room at the
+                    -- bottom of the panel). If the playlist has more
+                    -- songs than fit, the last visible row becomes a
+                    -- "+N more" hint instead of silently cutting off with
+                    -- no indication there's anything past what's shown --
+                    -- there's no real scrolling here (the sidebar draws
+                    -- once per song, not on a timer), so a hint is the
+                    -- honest version of a scrollbar for a static list.
+                    local capacity = math.max(1, h - 3)
+                    local shown = math.min(#playlist, capacity)
+                    local hasMore = #playlist > capacity
+                    if hasMore then shown = capacity - 1 end
+                    for i = 1, shown do
+                        f:addLabel():setText(playlist[i].name:sub(1, textW)):setSize(textW, 1)
+                            :setPosition(textX, 2 + i):setForeground(colors.white):setBackground(colors.gray)
+                    end
+                    if hasMore then
+                        f:addLabel():setText(("+%d more"):format(#playlist - shown):sub(1, textW)):setSize(textW, 1)
+                            :setPosition(textX, 2 + shown + 1):setForeground(colors.lightGray):setBackground(colors.gray)
                     end
                 end
             end
