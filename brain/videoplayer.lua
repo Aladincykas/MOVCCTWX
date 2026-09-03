@@ -639,21 +639,44 @@ function M.play(wall, screen, speakers, entry, config, opts)
 
                     lastFrameMs = os.epoch("utc")
 
+                    -- Yield to the event loop at least once per frame, ALWAYS,
+                    -- including when the picture is running behind and there is
+                    -- nothing to wait for.
+                    --
+                    -- This loop used to break straight out when it was behind
+                    -- -- and on a wall that renders slower than real time, which
+                    -- is the normal case for twelve monitors, that is EVERY
+                    -- frame. So the decoder went frame after frame after frame
+                    -- without ever yielding. CC:Tweaked terminates a computer
+                    -- that runs more than a few seconds without yielding, which
+                    -- is what "the video closed itself" was: not a decode error,
+                    -- not memory, just the game killing a program that would not
+                    -- let go of the thread.
+                    --
+                    -- It explains the rest of that symptom too. parallel only
+                    -- switches branches on a yield, so while the picture was
+                    -- behind, the audio and input branches never ran either:
+                    -- pause and stop went unanswered for exactly as long as the
+                    -- stall lasted, and the speakers played on by themselves off
+                    -- the buffer they were already holding. That is precisely
+                    -- what "it is stuck and the audio is still playing" looked
+                    -- like.
+                    --
+                    -- queueEvent/pullEvent rather than sleep: it does not cost a
+                    -- game tick, so yielding here cannot cap the frame rate the
+                    -- way even the shortest os.sleep would.
+                    os.queueEvent("kx_frame_yield")
+                    os.pullEvent("kx_frame_yield")
+
                     while not state.stopRequested do
                         local aheadSec = (cumulativeSec + frameIndex / fps) - clockSec()
-                        if aheadSec <= 0 then break end
-                        if aheadSec >= 0.05 then
-                            os.sleep(aheadSec)
-                        else
-                            -- Under one game tick left. os.sleep cannot resolve
-                            -- finer than a tick, so sleeping here would overshoot
-                            -- and cap playback below the encoded frame rate; yield
-                            -- through a queued event instead, which lets the audio
-                            -- and input coroutines run without costing a tick.
-                            os.queueEvent("kx_frame_yield")
-                            os.pullEvent("kx_frame_yield")
-                            break
-                        end
+                        -- Behind, or within one tick of due: nothing worth
+                        -- waiting for, and the yield above has already happened.
+                        -- os.sleep cannot resolve finer than a tick anyway, so
+                        -- sleeping for less would overshoot and hold playback
+                        -- below the encoded frame rate.
+                        if aheadSec < 0.05 then break end
+                        os.sleep(aheadSec)
                     end
                 end,
                 onAudioChunk = function(chunk)
