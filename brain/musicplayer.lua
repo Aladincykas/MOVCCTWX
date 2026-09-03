@@ -70,6 +70,30 @@ local function formatTime(seconds)
     return ("%d:%02d"):format(m, s)
 end
 
+-- Use instead of plain sleep(seconds) inside playSong()'s background
+-- coroutines (wall-viz, status-tick). Basalt's `schedules` table is a
+-- single list shared across EVERY basalt.run() call, never cleared
+-- between them -- a coroutine suspended in plain sleep() only wakes on
+-- its own specific timer, so if a song ends mid-sleep, that coroutine
+-- stays dormant in schedules (not yet aware it should stop) until its
+-- timer happens to fire, which can land during a LATER song's
+-- basalt.run() session instead of this one. If that coroutine's
+-- post-loop cleanup does something global (wall-viz's does: it blacks
+-- out and clears the WHOLE wall on exit), that cleanup then runs in the
+-- middle of the NEXT song's own wall output -- confirmed in-game as
+-- exactly this, during playlist auto-advance (a black band torn across
+-- an otherwise-correct plasma frame). Waking on "music_control" too
+-- (queued by every stop/pause path) means the coroutine notices and
+-- finishes essentially the same tick playback actually stops, not up to
+-- `seconds` later.
+local function waitTick(seconds)
+    local timerId = os.startTimer(seconds)
+    while true do
+        local event, id = os.pullEvent()
+        if (event == "timer" and id == timerId) or event == "music_control" then return end
+    end
+end
+
 -- Use instead of basalt.schedule() everywhere in this file. Plain sleep()
 -- (an os.sleep alias) is just os.pullEvent("timer") under the hood, which
 -- THROWS on a terminate event no matter what filter it's given, and
@@ -457,7 +481,14 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                     end
                     style.step(wallW, wallH, state.paused)
                     if not state.paused then style.draw(wall, wallW, wallH) end
-                    sleep(0.15)
+                    -- waitTick, not plain sleep() -- see its own comment
+                    -- for why: this coroutine needs to notice
+                    -- state.stopRequested THE SAME TICK it's set, not up
+                    -- to 0.15s later, or it can survive into the NEXT
+                    -- song's basalt.run() session and wipe ITS wall
+                    -- output mid-playback (confirmed in-game during
+                    -- playlist auto-advance).
+                    waitTick(0.15)
                 end
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
@@ -471,31 +502,48 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         -- playpause/stop/volume command works identically to tapping the
         -- button.
         safeSchedule(function()
+            -- Unfiltered pullEvent, not os.pullEvent("movcctwx_remote_action")
+            -- -- a filtered pullEvent only ever wakes for that ONE event
+            -- type, so if this song ends WITHOUT a remote command ever
+            -- arriving (the normal case), this coroutine would never get
+            -- resumed again at all, staying suspended in Basalt's
+            -- schedules table indefinitely and only noticing
+            -- state.stopRequested (and self-terminating) whenever some
+            -- FUTURE remote command happens to arrive -- possibly during
+            -- a LATER song, where its stale `action` handling could fire
+            -- against the wrong song's state. Reacting to "music_control"
+            -- (queued by every stop/pause path below) closes that gap.
             while not state.stopRequested do
-                local _, action = os.pullEvent("movcctwx_remote_action")
-                -- startup.lua's remoteMenuWatcher treats these 4 as "go
-                -- somewhere else" -- from in here that's indistinguishable
-                -- from a plain stop: halt this song, hand control back to
-                -- M.run()'s outer loop (guarded below by
-                -- MOVCCTWX_REMOTE_PENDING), which returns up to mainLoop,
-                -- which then honors the real target.
-                if action == "open_video_menu" or action == "open_music_menu"
-                    or action == "play_video" or action == "play_music" then
-                    action = "stop"
+                local event, action = os.pullEvent()
+                if event == "movcctwx_remote_action" then
+                    -- startup.lua's remoteMenuWatcher treats these 4 as
+                    -- "go somewhere else" -- from in here that's
+                    -- indistinguishable from a plain stop: halt this
+                    -- song, hand control back to M.run()'s outer loop
+                    -- (guarded below by MOVCCTWX_REMOTE_PENDING), which
+                    -- returns up to mainLoop, which then honors the real
+                    -- target.
+                    if action == "open_video_menu" or action == "open_music_menu"
+                        or action == "play_video" or action == "play_music" then
+                        action = "stop"
+                    end
+                    if action == "playpause" then
+                        state.paused = not state.paused
+                        if playPauseBtn then playPauseBtn:setText(state.paused and "Play" or "Pause") end
+                        os.queueEvent("music_control")
+                    elseif action == "stop" then
+                        playReason = "stopped"
+                        state.stopRequested = true
+                        os.queueEvent("music_control")
+                    elseif action == "vol-1" then adjustVolume(-0.01)
+                    elseif action == "vol+1" then adjustVolume(0.01)
+                    elseif action == "vol-10" then adjustVolume(-0.10)
+                    elseif action == "vol+10" then adjustVolume(0.10)
+                    end
                 end
-                if action == "playpause" then
-                    state.paused = not state.paused
-                    if playPauseBtn then playPauseBtn:setText(state.paused and "Play" or "Pause") end
-                    os.queueEvent("music_control")
-                elseif action == "stop" then
-                    playReason = "stopped"
-                    state.stopRequested = true
-                    os.queueEvent("music_control")
-                elseif action == "vol-1" then adjustVolume(-0.01)
-                elseif action == "vol+1" then adjustVolume(0.01)
-                elseif action == "vol-10" then adjustVolume(-0.10)
-                elseif action == "vol+10" then adjustVolume(0.10)
-                end
+                -- "music_control" (or any other event) just loops back
+                -- around to re-check state.stopRequested -- see this
+                -- coroutine's opening comment for why that alone matters.
             end
         end)
 
@@ -604,7 +652,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                     volumePct = math.floor(state.volume / config.MAX_VOLUME * 100 + 0.5),
                 }
 
-                sleep(0.3)
+                waitTick(0.3) -- see waitTick's own comment
             end
         end)
 
