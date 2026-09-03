@@ -28,6 +28,7 @@ local FILES = {
     "/wall.lua",
     "/remote.lua",
     "/musicplayer.lua",
+    "/wallviz.lua",
     "/videoplayer.lua",
     "/settings.lua",
     "/basalt.lua",

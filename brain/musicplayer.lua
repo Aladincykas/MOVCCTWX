@@ -196,60 +196,14 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
     -- ==== Now Playing screen ====
     -- Split by design: the computer's own screen shows just text (song
     -- name, playing/paused + elapsed time, volume) and the transport
-    -- buttons -- no visuals. The big bar-equalizer visual instead renders
-    -- full-screen across the whole 12-monitor wall (wallViz below), using
-    -- wall.lua's row-blit (the same mechanism videoplayer.lua uses for
-    -- video frames) so it correctly spans all 12 monitors as one surface,
-    -- not just one tile. CC has no real audio-analysis API, so like the
-    -- original Pocket-Computer jukebox's equalizer this is decorative, not
-    -- a real spectrum.
-    -- top -> bottom color band. Looked up PROPORTIONALLY (see
-    -- vizRowColor below), not by absolute row number, so the balance of
-    -- colors stays the same regardless of how many rows the wall actually
-    -- has.
-    local VIZ_ROW_COLORS = { colors.red, colors.orange, colors.yellow, colors.lime, colors.green }
-    local function vizRowColor(r, totalRows)
-        local idx = math.ceil(r / totalRows * #VIZ_ROW_COLORS)
-        idx = math.max(1, math.min(#VIZ_ROW_COLORS, idx))
-        return VIZ_ROW_COLORS[idx]
-    end
-
-    -- Draws one full-screen equalizer frame across the wall -- a plain
-    -- Lua table of "current bar height per column" (mutated by the
-    -- random-walk step in the wall-viz coroutine below), rendered as one
-    -- wall.blit() call per row, each of which internally fans out across
-    -- all WALL_COLUMNS monitors (see wall.lua).
-    --
-    -- Filled cells are a blank space on a COLORED BACKGROUND, not a "#"
-    -- character on a colored foreground -- a text glyph only covers part
-    -- of its cell and has gaps, which reads as a faint sparse texture from
-    -- a distance instead of a solid block. A colored background fills the
-    -- whole cell, so each "on" column reads as one solid rectangle of
-    -- color stacked on the next, much closer to solid cubes/bars from
-    -- across a room.
-    -- blit()'s text/fg/bg must all be the same length, and fg must be
-    -- valid hex-digit characters even though a blank space glyph never
-    -- shows its foreground color -- these two rows are memoized per width
-    -- (recomputed only if the wall's column count ever changes) instead of
-    -- rebuilt every single frame.
-    local BLANK_TEXT_ROW, BLANK_FG_ROW, MEMO_LEN = nil, nil, 0
-    local BG_HEX = colors.toBlit(colors.black)
-    local function drawWallFrame(wall, vizHeights, cols, rows)
-        if cols ~= MEMO_LEN then
-            BLANK_TEXT_ROW = (" "):rep(cols)
-            BLANK_FG_ROW = BG_HEX:rep(cols)
-            MEMO_LEN = cols
-        end
-        for r = 1, rows do
-            local bgChars = {}
-            local onHex = colors.toBlit(vizRowColor(r, rows))
-            for c = 1, cols do
-                bgChars[c] = (vizHeights[c] >= (rows - r + 1)) and onHex or BG_HEX
-            end
-            wall.setCursorPos(1, r)
-            wall.blit(BLANK_TEXT_ROW, BLANK_FG_ROW, table.concat(bgChars))
-        end
-    end
+    -- buttons -- no visuals. The big visual instead renders full-screen
+    -- across the whole 12-monitor wall (see the wall-viz coroutine below),
+    -- using wall.lua's row-blit (the same mechanism videoplayer.lua uses
+    -- for video frames) so it correctly spans all 12 monitors as one
+    -- surface, not just one tile. See wallviz.lua for the actual visual
+    -- styles (bars/wave/pulse) and why the style is picked per-song, not
+    -- randomly on every play.
+    local wallviz = require("wallviz")
 
     -- backLabel: text for the footer button that returns without finishing
     -- the song (defaults to "Back to Library"; playlist playback passes
@@ -457,19 +411,13 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
         if wall then
             safeSchedule(function()
                 local wallW, wallH = wall.getSize()
-                local vizHeights = {}
-                for c = 1, wallW do vizHeights[c] = math.random(0, wallH) end
+                local style = wallviz.forSong(song.name)
+                style.init(wallW, wallH)
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
                 while not state.stopRequested do
-                    if not state.paused then
-                        local maxStep = math.max(1, math.floor(wallH * 0.2))
-                        for c = 1, wallW do
-                            local h2 = (vizHeights[c] or 0) + math.random(-maxStep, maxStep)
-                            vizHeights[c] = math.max(0, math.min(wallH, h2))
-                        end
-                        drawWallFrame(wall, vizHeights, wallW, wallH)
-                    end
+                    style.step(wallW, wallH, state.paused)
+                    if not state.paused then style.draw(wall, wallW, wallH) end
                     sleep(0.3)
                 end
                 wall.setBackgroundColor(colors.black)
