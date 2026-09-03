@@ -209,8 +209,9 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     -- using wall.lua's row-blit (the same mechanism videoplayer.lua uses
     -- for video frames) so it correctly spans all 12 monitors as one
     -- surface, not just one tile. See wallviz.lua for the actual visual
-    -- styles (bars/wave/plasma/starfield) and why the style is picked per-song, not
-    -- randomly on every play.
+    -- styles (bars/wave/3 plasma variants) -- it starts on a style picked
+    -- from the song name, then rotates to the next one roughly once a
+    -- minute (see the wall-viz coroutine below).
     local wallviz = require("wallviz")
 
     -- backLabel: text for the footer button that returns without finishing
@@ -419,23 +420,41 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         if wall then
             safeSchedule(function()
                 local wallW, wallH = wall.getSize()
-                local style = wallviz.forSong(song.name)
+                -- Starts on a style picked deterministically from the song
+                -- name (so a given song still always OPENS the same way),
+                -- then rotates to the next one roughly once a minute of
+                -- actual (non-paused) playback -- a long song doesn't just
+                -- sit on one look the whole time. STYLE_SWITCH_MS is wall
+                -- time, not paused-aware -- if paused for a long stretch,
+                -- it can switch immediately on resume; not worth the extra
+                -- bookkeeping to track paused-adjusted duration for a
+                -- purely decorative effect.
+                local STYLE_SWITCH_MS = 60 * 1000
+                local styleIndex = wallviz.startIndexForSong(song.name)
+                local style = wallviz.new(styleIndex)
                 style.init(wallW, wallH)
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
+                local nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
+
                 -- 0.15s (~7fps). CC's Lua is single-threaded -- this
                 -- coroutine, the DFPWM streaming loop, and the speaker
                 -- dispatcher all take turns on the same CPU budget between
-                -- yields. 0.1s (10fps, matching video) made plasma/
-                -- starfield's real per-cell trig math run often enough to
-                -- risk delaying the audio coroutine's turn -- reported
-                -- in-game as audio jumping/stuttering during playback.
-                -- This is a middle ground between that and the original
-                -- 0.3s, which read as too sluggish -- revisit if jumping
-                -- is still happening (bars/wave are much cheaper per-cell
-                -- than plasma/starfield, so this may need to vary by
-                -- style rather than one fixed rate for all of them).
+                -- yields. 0.1s (10fps, matching video) made plasma's real
+                -- per-cell trig math run often enough to risk delaying the
+                -- audio coroutine's turn -- reported in-game as audio
+                -- jumping/stuttering during playback. This is a middle
+                -- ground between that and the original 0.3s, which read
+                -- as too sluggish.
                 while not state.stopRequested do
+                    if not state.paused and os.epoch("utc") >= nextSwitchMs then
+                        styleIndex = styleIndex + 1
+                        style = wallviz.new(styleIndex)
+                        style.init(wallW, wallH)
+                        wall.setBackgroundColor(colors.black)
+                        wall.clear()
+                        nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
+                    end
                     style.step(wallW, wallH, state.paused)
                     if not state.paused then style.draw(wall, wallW, wallH) end
                     sleep(0.15)
