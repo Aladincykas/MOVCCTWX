@@ -153,8 +153,17 @@ end
 
 -- ==== Main menu ====
 local w, h = frame:getSize()
+-- Bumped every time the menu opens. Basalt's schedules table is
+-- module-level and never cleared between run() calls, so a coroutine
+-- scheduled by one menu can still be resumed during a LATER run() -- which
+-- for the idle clock would mean it drawing over a video that is playing.
+-- Capturing the generation lets a stale one notice it is stale and return.
+local menuGeneration = 0
+
 local function runMainMenu()
     local chosen = nil
+    menuGeneration = menuGeneration + 1
+    local myGeneration = menuGeneration
     resetScreen()
     clearFrameChildren(frame)
 
@@ -242,7 +251,13 @@ local function runMainMenu()
             local idlescreen = require("idlescreen")
             local wall = getWall("music")
             idlescreen.run(wall, function()
-                return chosen ~= nil or _G.MOVCCTWX_TERMINATED
+                -- A remote command exits the menu without setting `chosen`,
+                -- and a stale coroutine from a previous menu must stop the
+                -- moment a new one has started.
+                return chosen ~= nil
+                    or _G.MOVCCTWX_TERMINATED
+                    or _G.MOVCCTWX_REMOTE_PENDING
+                    or myGeneration ~= menuGeneration
             end)
         end)
         if not ok then return end
