@@ -68,7 +68,7 @@ end
 -- elapsed/remaining, volume, and the key controls. No touch targets --
 -- input here is keyboard (at the computer) or a remote command relayed
 -- from the pocket computer via remote.lua.
-local function drawControls(screen, state, entry, totalDurationSec, dropPct)
+local function drawControls(screen, state, entry, totalDurationSec, dropPct, diag)
     local elapsed = state.elapsedSec
     local remaining = math.max(0, totalDurationSec - elapsed)
     local pct = math.floor(state.volume / state.maxVolume * 100 + 0.5)
@@ -92,7 +92,13 @@ local function drawControls(screen, state, entry, totalDurationSec, dropPct)
         screen.write(("Praleista kadru: %d%%"):format(dropPct))
         screen.setTextColor(colors.white)
     end
-    screen.setCursorPos(1, 5)
+    if diag then
+        screen.setCursorPos(1, 4)
+        screen.setTextColor(math.abs(diag.driftSec) >= 0.5 and colors.orange or colors.lightGray)
+        screen.write(("drift %+.1fs  queue %d"):format(diag.driftSec, diag.queued))
+        screen.setTextColor(colors.white)
+    end
+    screen.setCursorPos(1, 6)
     screen.write("[space] play/pause  [s] stop  [left/right] volume  [q] quit")
 end
 
@@ -145,6 +151,12 @@ function M.play(wall, screen, speakers, entry, config)
     }
 
     local cumulativeSec = 0
+    -- Wall-clock reference for the WHOLE video, used only for diagnostics.
+    -- state.elapsedSec is derived from frame indices, so it advances at
+    -- whatever rate decoding manages -- it cannot reveal that playback is
+    -- running slower than real time. Comparing the two does.
+    local playStartMs = os.epoch("utc")
+    local pausedMs = 0
     local result = "done"
 
     -- Only the FIRST chunk is a real wait. Every chunk after it is fetched
@@ -188,6 +200,7 @@ function M.play(wall, screen, speakers, entry, config)
 
         local audioQueue = {}
         local audioQueueTail = 0
+        local audioQueueHead = 1
         local decodeFinished = false
 
         local handlers = {
@@ -197,9 +210,15 @@ function M.play(wall, screen, speakers, entry, config)
                 frameStart = os.epoch("utc")
             end,
             onVideoFrame = function(frame, frameIndex)
-                while state.paused and not state.stopRequested do
-                    os.pullEvent("video_control")
-                    frameStart = os.epoch("utc") - (frameIndex - 1) / fps * 1000
+                if state.paused then
+                    -- Time spent paused is not playback falling behind, so
+                    -- it has to come out of the drift figure below.
+                    local pauseBeganMs = os.epoch("utc")
+                    while state.paused and not state.stopRequested do
+                        os.pullEvent("video_control")
+                        frameStart = os.epoch("utc") - (frameIndex - 1) / fps * 1000
+                    end
+                    pausedMs = pausedMs + (os.epoch("utc") - pauseBeganMs)
                 end
                 if state.stopRequested then return end
 
@@ -243,7 +262,17 @@ function M.play(wall, screen, speakers, entry, config)
                 if now - lastControlsDraw > 500 then
                     local dropPct = framesPlayed > 0
                         and math.floor(framesDropped / framesPlayed * 100 + 0.5) or 0
-                    drawControls(screen, state, entry, entry.durationSec or 0, dropPct)
+                    -- drift > 0 means the media clock is BEHIND real time,
+                    -- i.e. decoding cannot keep up and the speakers will run
+                    -- dry no matter how the dispatcher behaves. queued is how
+                    -- many decoded audio chunks are waiting to be played: if
+                    -- drift is ~0 and queued stays at 0, the gap is in
+                    -- production; if queued grows, it is in dispatch.
+                    local diag = {
+                        driftSec = (now - playStartMs - pausedMs) / 1000 - state.elapsedSec,
+                        queued = audioQueueTail - audioQueueHead + 1,
+                    }
+                    drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
                     _G.MOVCCTWX_STATUS = {
                         screen = "video",
                         name = entry.name,
@@ -301,7 +330,7 @@ function M.play(wall, screen, speakers, entry, config)
                 function() -- audio dispatcher: drains the queue, fans each chunk out
                     -- to every networked speaker in sync (waits for each speaker's own
                     -- speaker_audio_empty ack, with a 3s per-speaker timeout).
-                    local head = 1
+                    local head = audioQueueHead
                     while true do
                         while head > audioQueueTail do
                             if state.stopRequested or decodeFinished then return end
@@ -310,6 +339,7 @@ function M.play(wall, screen, speakers, entry, config)
                         local chunk = audioQueue[head]
                         audioQueue[head] = nil
                         head = head + 1
+                        audioQueueHead = head
                         if chunk and not state.stopRequested and #speakers > 0 then
                             local funcs = {}
                             for _, speaker in ipairs(speakers) do
