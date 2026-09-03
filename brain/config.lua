@@ -14,7 +14,7 @@ return {
     },
 
     VIDEO_LIBRARIES = {
-        { label = "Didziulis ekranas 1", repo = "MOVCCTW0", branch = "main" },
+        { label = "Didziulis ekranas 1", repo = "MOVCCTW2", branch = "main" },
         { label = "Didziulis ekranas 2", repo = "MOVCCTW1", branch = "main" },
     },
 
