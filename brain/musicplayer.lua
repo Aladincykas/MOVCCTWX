@@ -415,10 +415,13 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
                 style.init(wallW, wallH)
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
+                -- 0.1s (10fps, same redraw rate videoplayer.lua already
+                -- uses for actual video on this same wall) -- 0.3s read as
+                -- sluggish/barely-moving in-game.
                 while not state.stopRequested do
                     style.step(wallW, wallH, state.paused)
                     if not state.paused then style.draw(wall, wallW, wallH) end
-                    sleep(0.3)
+                    sleep(0.1)
                 end
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
@@ -663,10 +666,25 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
             end
         end
 
-        local navW = math.min(math.floor((w - 10) / 4), 12)
+        -- 5 buttons total (4 nav + Main Menu) -- the nav group's width is
+        -- computed to always leave real room before Main Menu's own
+        -- right-anchored position, instead of a fixed width that assumed a
+        -- much wider (old wall-monitor) screen. On this computer's own
+        -- narrower terminal, that fixed width put Main Menu's button
+        -- exactly on top of Playlist's -- both existed, but Main Menu
+        -- (added last, so drawn on top) silently covered Playlist
+        -- entirely, making it invisible and unclickable. Confirmed
+        -- in-game: the footer only ever showed 4 buttons.
+        local mainMenuW = math.min(w - 2, 12)
+        local mainMenuX = w - mainMenuW + 1
+        local navGap = 1
+        local navAreaW = (mainMenuX - 2) - 2 -- up to 2 cols clear before Main Menu
+        local navW = math.max(6, math.floor((navAreaW - 3 * navGap) / 4))
+        local function navX(i) return 2 + (i - 1) * (navW + navGap) end
+
         f:addButton()
             :setText("< Prev")
-            :setPosition(2, footerRow)
+            :setPosition(navX(1), footerRow)
             :setSize(navW, 1)
             :setBackground(colors.gray)
             :setForeground(colors.lime)
@@ -677,7 +695,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
 
         f:addButton()
             :setText("Next >")
-            :setPosition(4 + navW, footerRow)
+            :setPosition(navX(2), footerRow)
             :setSize(navW, 1)
             :setBackground(colors.gray)
             :setForeground(colors.lime)
@@ -688,7 +706,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
 
         f:addButton()
             :setText("Refresh")
-            :setPosition(6 + navW * 2, footerRow)
+            :setPosition(navX(3), footerRow)
             :setSize(navW, 1)
             :setBackground(colors.gray)
             :setForeground(colors.lime)
@@ -700,7 +718,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
 
         f:addButton()
             :setText("Playlist")
-            :setPosition(8 + navW * 3, footerRow)
+            :setPosition(navX(4), footerRow)
             :setSize(navW, 1)
             :setBackground(colors.gray)
             :setForeground(colors.lime)
@@ -711,8 +729,8 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
 
         f:addButton()
             :setText("Main Menu")
-            :setPosition(w - math.min(w - 2, 14) + 1, footerRow)
-            :setSize(math.min(w - 2, 14), 1)
+            :setPosition(mainMenuX, footerRow)
+            :setSize(mainMenuW, 1)
             :setBackground(colors.gray)
             :setForeground(colors.lime)
             :onClick(function()
