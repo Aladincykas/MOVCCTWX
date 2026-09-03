@@ -196,8 +196,16 @@ function M.play(wall, screen, speakers, entry, config)
     -- playback position; without it, the wall clock -- which is still more
     -- honest than counting frames, since a frame counter simply slows down
     -- along with playback and never reveals that it has fallen behind.
+    -- Deliberately the wall clock and NOT the audio position, even when a
+    -- separate audio track exists. Pacing video to audio sounds correct in
+    -- theory, but on a wall that cannot render in real time it means the
+    -- renderer is permanently behind and throws frames away instead of
+    -- showing them. Audio still plays perfectly either way, because it runs
+    -- in its own coroutine; the difference is only whether slow rendering
+    -- shows up as smooth-but-behind (this) or as a slideshow (pacing to
+    -- audio). audioElapsedSec is kept for the drift readout so the gap
+    -- between the two stays visible.
     local function clockSec()
-        if hasSeparateAudio then return audioElapsedSec end
         return (os.epoch("utc") - playStartMs - pausedMs) / 1000
     end
 
@@ -335,12 +343,14 @@ function M.play(wall, screen, speakers, entry, config)
                 -- holds the last frame drawn, so the caches stay truthful and
                 -- the next frame that does get drawn diffs against reality.
                 local dueSec = cumulativeSec + (frameIndex - 1) / fps
-                if clockSec() - dueSec <= 1 / fps then
-                    drawFrame(wall, frame, lastPalette, lastRows)
-                else
-                    framesDropped = framesDropped + 1
-                end
-                state.elapsedSec = hasSeparateAudio and audioElapsedSec or dueSec
+                -- Every frame is drawn, in order. Dropping late frames to
+                -- chase the audio clock was tried and made things visibly
+                -- worse: the wall renders slower than real time, so it never
+                -- caught up and simply skipped nearly everything. Drawing all
+                -- of them means video runs behind the sound on a slow wall --
+                -- but it LOOKS right, and looking right is what matters here.
+                drawFrame(wall, frame, lastPalette, lastRows)
+                state.elapsedSec = dueSec
                 framesPlayed = frameIndex
 
                 -- Controls redraw at ~2Hz, not every video frame -- the
@@ -360,7 +370,7 @@ function M.play(wall, screen, speakers, entry, config)
                     -- drift is ~0 and queued stays at 0, the gap is in
                     -- production; if queued grows, it is in dispatch.
                     local diag = {
-                        driftSec = (now - playStartMs - pausedMs) / 1000 - clockSec(),
+                        driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
                         queued = audioQueueTail - audioQueueHead + 1,
                     }
                     drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
