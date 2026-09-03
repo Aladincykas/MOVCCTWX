@@ -27,26 +27,25 @@ return {
         "monitor_298", "monitor_297", "monitor_301", "monitor_304",
         "monitor_306", "monitor_305", "monitor_302", "monitor_303",
     },
-    -- The wall switches text scale depending on what's on it, because
-    -- music visuals and video have completely different needs.
+    -- Text scale for the wall. 1.0 gives 81x40 characters per 8x6 monitor,
+    -- so 324x120 across the whole 4x3 wall.
     --
-    -- MUSIC 0.5: CC's smallest text scale = the MOST characters. Each 8x6
-    -- monitor goes from 81x40 characters to 162x80, so the wall is
-    -- 648x240 -- 4x the detail. The visualizer only redraws a couple of
-    -- times a second, so it can afford that, and it automatically slows
-    -- its own redraw rate on a bigger wall (see musicplayer.lua's
-    -- frameInterval).
+    -- 0.5 is available (CC's smallest scale = the most characters, 648x240
+    -- here) but isn't used for either mode:
+    --   * Music visuals gain nothing from it -- they're big abstract bars
+    --     and colour fields, and 4x the cells is 4x the render work per
+    --     frame competing with audio on CC's single Lua thread.
+    --   * Video can't afford it at all: ~58x the old single monitor's data
+    --     per frame at 25fps, and .32vid chunks too big for GitHub to
+    --     accept unless segments get so short playback constantly stalls.
     --
-    -- VIDEO 1.0: 324x120. Video needs ~25fps, and at 0.5 that's ~58x the
-    -- old single monitor's data per frame -- both far too much to render
-    -- and far too big to upload (the segments would have to be so short
-    -- that playback stalls to reload every few seconds). 1.0 keeps each
-    -- individual monitor at roughly the per-monitor load the old
-    -- single-monitor build already handled fine.
+    -- Kept as two separate settings because the wall CAN switch between
+    -- them at runtime (wall.setScale, applied per mode in startup.lua), so
+    -- either can be changed on its own without touching the other.
     --
     -- Videos must be ENCODED at the matching size (324x120) -- addmedia
     -- does that automatically when you pick "Didziulis ekranas".
-    WALL_TEXT_SCALE_MUSIC = 0.5,
+    WALL_TEXT_SCALE_MUSIC = 1.0,
     WALL_TEXT_SCALE_VIDEO = 1.0,
     -- Fallback for anything that opens the wall without saying which mode.
     WALL_TEXT_SCALE = 1.0,
