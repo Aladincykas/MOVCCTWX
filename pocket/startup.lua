@@ -104,7 +104,11 @@ end
 local function pickFromList(title, items, labelFn, onAdd)
     local w, h = term.getSize()
     local top = 3
-    local perPage = h - top - 1
+    -- Footer takes 2 rows now, not 1 -- "Up/Down Enter=play A=add Q=back"
+    -- (32 chars) never fit on a Pocket Computer's 26-column screen even
+    -- truncated, it just chopped off mid-word ("...A=a"). Splitting
+    -- across 2 short lines instead of cramming/truncating one long one.
+    local perPage = h - top - 2
     local selected = 1
     local scroll = 0
 
@@ -135,9 +139,8 @@ local function pickFromList(title, items, labelFn, onAdd)
         end
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.lightGray)
-        term.setCursorPos(1, h)
-        term.clearLine()
-        term.write((onAdd and "Up/Down Enter=play A=add Q=back" or "Up/Down Enter=play Q=back"):sub(1, w))
+        centerText(h - 1, "Up/Down  Enter=play")
+        centerText(h, onAdd and "A=add  Q=back" or "Q=back")
 
         local event, key = os.pullEvent("key")
         if key == keys.up then
@@ -224,7 +227,12 @@ end
 local function playlistScreen(brainId, playlist)
     local w, h = term.getSize()
     local top = 3
-    local perPage = h - top - 1
+    -- Footer takes 2 rows now, not 1 -- "Enter=remove P=play all Q=back"
+    -- (31 chars) never fit on a Pocket Computer's 26-column screen even
+    -- truncated, it just chopped off mid-word. Splitting across 2 short
+    -- lines instead of cramming/truncating one long one -- same fix as
+    -- pickFromList above.
+    local perPage = h - top - 2
     local selected = 1
     local scroll = 0
 
@@ -234,7 +242,8 @@ local function playlistScreen(brainId, playlist)
         term.clear()
         centerText(1, "PLAYLIST", colors.lime)
         if #playlist == 0 then
-            centerText(top, "(empty -- add from Music Player)", colors.gray)
+            centerText(top, "(empty)", colors.gray)
+            centerText(top + 1, "Add from Music Player", colors.gray)
         else
             if selected > #playlist then selected = #playlist end
             if selected < scroll + 1 then scroll = selected - 1 end
@@ -256,9 +265,8 @@ local function playlistScreen(brainId, playlist)
         end
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.lightGray)
-        term.setCursorPos(1, h)
-        term.clearLine()
-        term.write(("Enter=remove P=play all Q=back"):sub(1, w))
+        centerText(h - 1, "Enter=remove")
+        centerText(h, "P=play all  Q=back")
 
         local event, key = os.pullEvent("key")
         if key == keys.up then
