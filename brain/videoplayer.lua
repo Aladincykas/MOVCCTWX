@@ -640,7 +640,27 @@ function M.play(wall, screen, speakers, entry, config)
         end
     end
 
-    parallel.waitForAll(videoLoop, streamAudio, statusLoop)
+    -- pcall'd so the speakers get silenced even when playback exits by
+    -- error -- notably [q], which raises "Terminated" to unwind all the way
+    -- out of the menus.
+    local ranOk, runErr = pcall(parallel.waitForAll, videoLoop, streamAudio, statusLoop)
+
+    -- Stopping playback has to DISCARD what the speakers are holding, not
+    -- just stop supplying them. There is up to AUDIO_BUFFER_TARGET_SEC of
+    -- audio queued ahead at any moment, so without this the soundtrack
+    -- carried on for a couple of seconds after quitting, over whatever menu
+    -- had already come back up.
+    for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
+
+    if not ranOk then
+        wall.setBackgroundColor(colors.black)
+        wall.clear()
+        screen.setBackgroundColor(colors.black)
+        screen.setTextColor(colors.white)
+        screen.clear()
+        _G.MOVCCTWX_STATUS = { screen = "video_menu" }
+        error(runErr, 0)
+    end
 
     wall.setBackgroundColor(colors.black)
     wall.clear()
