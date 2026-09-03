@@ -276,12 +276,25 @@ function M.play(wall, screen, speakers, entry, config)
                     local funcs = {}
                     for _, speaker in ipairs(speakers) do
                         funcs[#funcs + 1] = function()
-                            while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
-                                os.pullEvent("speaker_audio_empty")
+                            while not state.stopRequested and not state.paused do
+                                if speaker.playAudio(chunk, state.volume) then return end
+                                -- Waits for the speaker to make room, but wakes
+                                -- on video_control too. Waiting only on
+                                -- speaker_audio_empty meant a pause could not
+                                -- be noticed until the speaker had chewed
+                                -- through everything it was holding -- several
+                                -- seconds, felt as pause simply not working.
+                                repeat
+                                    local ev = os.pullEvent()
+                                until ev == "speaker_audio_empty" or ev == "video_control"
+                                    or state.paused or state.stopRequested
                             end
                         end
                     end
                     if #funcs > 0 then parallel.waitForAll(table.unpack(funcs)) end
+                    -- Re-checked here so a pause that arrived mid-write takes
+                    -- effect now rather than after another block is queued.
+                    if state.paused then pausedHere = true break end
 
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
