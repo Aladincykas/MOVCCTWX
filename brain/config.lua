@@ -77,6 +77,11 @@ return {
     -- depends on it.
     IDLE_CLOCK = true,
 
+    -- Whether a video that HAS subtitles starts with them showing. [t] on the
+    -- keyboard toggles them mid-video either way, and a video without a
+    -- subtitle file is unaffected by this.
+    SUBTITLES = true,
+
     MENU_MUSIC_VOLUME = 0.5,
     MENU_MUSIC_NAME = nil,
 

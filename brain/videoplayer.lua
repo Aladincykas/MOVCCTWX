@@ -5,6 +5,7 @@
 -- see vendor/32vid-decode.lua's header before touching decode logic.
 
 local decodeModule = require("vendor.32vid-decode")
+local subtitleModule = require("subtitles")
 local settings = require("settings")
 
 local M = {}
@@ -98,13 +99,13 @@ local function drawControls(screen, state, entry, totalDurationSec, diag)
         screen.setTextColor(colors.white)
     end
     screen.setCursorPos(1, 7)
-    screen.write("[space] play/pause  [s] stop  [left/right] volume  [q] quit")
+    screen.write("[space] play/pause  [s] stop  [left/right] volume  [t] subtitles  [q] quit")
 end
 
 -- lastPalette / lastRows dedupe redraws to what actually changed since the
 -- previous frame -- this is what keeps the wall's real blit throughput
 -- manageable at video framerates (a static region doesn't get re-sent).
-local function drawFrame(wall, image, lastPalette, lastRows)
+local function drawFrame(wall, image, lastPalette, lastRows, patches)
     for i, v in ipairs(image.palette) do
         local prev = lastPalette[i]
         if not prev or prev[1] ~= v[1] or prev[2] ~= v[2] or prev[3] ~= v[3] then
@@ -113,11 +114,28 @@ local function drawFrame(wall, image, lastPalette, lastRows)
         end
     end
     for y, r in ipairs(image) do
+        local text, fg, bg = r[1], r[2], r[3]
+        -- Subtitles are spliced into the frame's OWN rows rather than blitted
+        -- on top afterwards, because wall.blit always writes a whole row
+        -- starting at column 1 -- it has no partial-row write to layer with.
+        --
+        -- Splicing also keeps this cache honest: what is remembered is exactly
+        -- what went to the monitor, so when a cue ends the row differs from the
+        -- remembered one again and gets redrawn by itself. Blitting the box
+        -- separately would leave the cache describing the video underneath, and
+        -- the subtitle would never be cleared.
+        local patch = patches and patches[y]
+        if patch then
+            local head, tail = patch.x - 1, patch.x + #patch.text
+            text = text:sub(1, head) .. patch.text .. text:sub(tail)
+            fg = fg:sub(1, head) .. patch.fg .. fg:sub(tail)
+            bg = bg:sub(1, head) .. patch.bg .. bg:sub(tail)
+        end
         local prevRow = lastRows[y]
-        if not prevRow or prevRow[1] ~= r[1] or prevRow[2] ~= r[2] or prevRow[3] ~= r[3] then
+        if not prevRow or prevRow[1] ~= text or prevRow[2] ~= fg or prevRow[3] ~= bg then
             wall.setCursorPos(1, y)
-            wall.blit(r[1], r[2], r[3])
-            lastRows[y] = r
+            wall.blit(text, fg, bg)
+            lastRows[y] = { text, fg, bg }
         end
     end
 end
@@ -158,6 +176,10 @@ function M.play(wall, screen, speakers, entry, config)
     local pausedMs = 0
     local result = "done"
 
+    -- The last laid-out cue and the palette colours it was drawn with, so an
+    -- unchanged subtitle is not rebuilt on every frame.
+    local lastCue, lastPatches, lastTextHex, lastBoxHex = nil, nil, nil, nil
+
     -- Videos encoded from 2026-09-03 onward carry their audio as separate
     -- .dfpwm files (entry.audio) instead of interleaving it into the .32vid
     -- stream. That matters because interleaved audio can only be produced as
@@ -173,6 +195,40 @@ function M.play(wall, screen, speakers, entry, config)
     -- Older videos have no entry.audio and still use the interleaved path
     -- below, so existing libraries keep working.
     local hasSeparateAudio = type(entry.audio) == "table" and #entry.audio > 0
+
+    -- Subtitles ship as one small file of their own (entry.subs) and are drawn
+    -- here in the monitor's own font, never burned into the picture.
+    --
+    -- Burning them in was tried and measured first: at the wall's real output
+    -- resolution the text has to be about a third of the frame tall before it
+    -- survives the downscale and the dither to 16 colours, and even then it
+    -- comes out soft. Drawn here it costs a few text rows, stays sharp over any
+    -- scene, can be switched off mid-video, and adds about 50KB to an entire
+    -- film instead of inflating every single chunk.
+    --
+    -- Fetched once, up front: a film's cue file is smaller than any one video
+    -- chunk, and doing it here means it can never interrupt playback later.
+    local subtitleCursor, subtitleScale = nil, nil
+    local subtitlesOn = config.SUBTITLES ~= false
+    if type(entry.subs) == "string" and entry.subs ~= "" then
+        local ok = pcall(function()
+            local url = entry.subs .. (entry.subs:find("?") and "&" or "?")
+                .. "t=" .. tostring(os.epoch("utc"))
+            local response = http.get(url)
+            if not response then error("no response") end
+            local body = response.readAll()
+            response.close()
+            local cues = subtitleModule.parse(body or "")
+            if #cues > 0 then
+                subtitleCursor = subtitleModule.newCursor(cues)
+                local wallW, wallH = wall.getSize()
+                subtitleScale = subtitleModule.scaleFor(wallW, wallH)
+            end
+        end)
+        -- A missing or malformed subtitle file must never stop the film. This
+        -- is the one part of playback that is purely additive.
+        if not ok then subtitleCursor = nil end
+    end
 
     -- DFPWM is one bit per sample at 48kHz, i.e. exactly 6000 bytes per
     -- second, always. So the number of audio bytes handed to the speakers is
@@ -483,7 +539,34 @@ function M.play(wall, screen, speakers, entry, config)
                     -- caught up and simply skipped nearly everything. Drawing all
                     -- of them means video runs behind the sound on a slow wall --
                     -- but it LOOKS right, and looking right is what matters here.
-                    drawFrame(wall, frame, lastPalette, lastRows)
+                    -- Cues are timed against the SOURCE video and dueSec is
+                    -- this frame's own position in it, so the words always match
+                    -- the picture they were written for, even when the picture
+                    -- is running behind the sound on a slow wall.
+                    local patches = nil
+                    if subtitleCursor and subtitlesOn then
+                        local cue = subtitleCursor:at(dueSec)
+                        if cue then
+                            -- Laying a cue out again every frame would rebuild
+                            -- an identical grid of cells twenty times a second.
+                            -- A cue stays up for seconds, so it is built once
+                            -- and reused until it changes -- or until the
+                            -- palette does, since the two colours it is drawn
+                            -- with come from the frame's own palette.
+                            local textHex, boxHex = subtitleModule.contrastPair(frame.palette)
+                            if cue ~= lastCue or textHex ~= lastTextHex or boxHex ~= lastBoxHex then
+                                local wallW, wallH = wall.getSize()
+                                lastPatches = subtitleModule.patches(
+                                    subtitleModule.layout(cue, wallW, wallH, subtitleScale),
+                                    textHex, boxHex)
+                                lastCue, lastTextHex, lastBoxHex = cue, textHex, boxHex
+                            end
+                            patches = lastPatches
+                        else
+                            lastCue, lastPatches = nil, nil
+                        end
+                    end
+                    drawFrame(wall, frame, lastPalette, lastRows, patches)
                     state.elapsedSec = dueSec
                     framesPlayed = frameIndex
 
@@ -578,6 +661,7 @@ function M.play(wall, screen, speakers, entry, config)
                                     error("Terminated", 0)
                                 elseif a == keys.space then action = "playpause"
                                 elseif a == keys.s then action = "stop"
+                                elseif a == keys.t then action = "subtitles"
                                 elseif a == keys.left then action = "vol-1"
                                 elseif a == keys.right then action = "vol+1"
                                 end
@@ -600,6 +684,15 @@ function M.play(wall, screen, speakers, entry, config)
                             elseif action == "stop" then
                                 state.stopRequested = true
                                 os.queueEvent("video_control")
+                            elseif action == "subtitles" then
+                                subtitlesOn = not subtitlesOn
+                                -- The rows the box covered still hold its cells
+                                -- in the row cache, and the video underneath may
+                                -- not have changed there, so nothing would
+                                -- repaint them. Dropping the cache forces the
+                                -- next frame to redraw every row.
+                                for y in pairs(lastRows) do lastRows[y] = nil end
+                                lastCue, lastPatches = nil, nil
                             elseif action == "vol-1" then adjustVolume(-0.01)
                             elseif action == "vol+1" then adjustVolume(0.01)
                             elseif action == "vol-10" then adjustVolume(-0.10)
