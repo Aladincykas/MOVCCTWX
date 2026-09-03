@@ -36,6 +36,13 @@ _G.MOVCCTWX_TERMINATED = false
 -- and musicplayer.lua update this continuously while something's playing
 -- (see their comments); everywhere else it's just {screen=...}.
 _G.MOVCCTWX_STATUS = { screen = "menu" }
+-- The playlist: a shared, program-lifetime table (not scoped to one Music
+-- session, unlike the old version) -- both the computer's own Playlist
+-- screen (musicplayer.lua) and remote playlist_add/playlist_remove
+-- commands (remote.lua) mutate this SAME table in place, so either side
+-- adding/removing a song is immediately visible to the other. Each entry
+-- is a full song table ({name=, url=...}), same shape as songs.json.
+_G.MOVCCTWX_PLAYLIST = {}
 
 local frame = basalt.createFrame()
 frame:setBackground(colors.black)
@@ -233,6 +240,7 @@ end
 local function mainLoop()
     local screen = "menu"
     local pendingSongName = nil
+    local pendingPlayAllPlaylist = false
     while true do
         -- A remote menu-level command always wins over whatever the
         -- just-finished screen returned -- see remoteMenuWatcher below.
@@ -254,6 +262,7 @@ local function mainLoop()
                 screen = "menu"
             else
                 pendingSongName = screen.name
+                pendingPlayAllPlaylist = screen.playAllPlaylist or false
                 screen = "music"
             end
         elseif screen == "menu" then
@@ -267,8 +276,9 @@ local function mainLoop()
             clearFrameChildren(frame)
             _G.MOVCCTWX_STATUS = { screen = "music_menu" }
             local musicplayer = require("musicplayer")
-            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall())
+            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall(), pendingPlayAllPlaylist)
             pendingSongName = nil
+            pendingPlayAllPlaylist = false
             _G.MOVCCTWX_STATUS = { screen = "menu" }
             screen = (exitReason == "quit") and "quit" or "menu"
         elseif screen == "quit" or _G.MOVCCTWX_TERMINATED then
@@ -336,6 +346,9 @@ local function remoteMenuWatcher()
             _G.MOVCCTWX_REMOTE_PENDING = true
         elseif action == "play_music" then
             _G.MOVCCTWX_REMOTE_TARGET = { screen = "music", name = name }
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        elseif action == "play_playlist" then
+            _G.MOVCCTWX_REMOTE_TARGET = { screen = "music", playAllPlaylist = true }
             _G.MOVCCTWX_REMOTE_PENDING = true
         end
         if _G.MOVCCTWX_REMOTE_PENDING then

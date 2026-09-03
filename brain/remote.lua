@@ -17,20 +17,52 @@
 -- screen happens to be active.
 --
 -- Expected message shape from the pocket computer: { action = "...", name
--- = "..." } (name only used by play_video/play_music). "get_status" is a
--- special action: still allowlist-checked like everything else, but never
--- turned into a movcctwx_remote_action event -- it's a read, not a
--- command. Every ack (get_status's included) carries the CURRENT
--- _G.MOVCCTWX_STATUS snapshot (kept up to date by videoplayer.lua and
--- musicplayer.lua while something's playing -- see their comments), so a
--- pocket computer can show live title/paused/elapsed/volume without a
--- second round-trip after every command.
+-- = "..." } (name only used by play_video/play_music/playlist_remove),
+-- or { action = "playlist_add", song = {name=, url=...} } (the pocket
+-- already has the full song table from its own manifest fetch, so it
+-- sends that directly instead of making the brain re-fetch/re-look-up).
+--
+-- get_status, playlist_add and playlist_remove are all "reads/local
+-- mutations", not commands -- handled entirely INLINE below, never turned
+-- into a movcctwx_remote_action event, because they don't need to
+-- interrupt or navigate whatever screen is currently showing (unlike
+-- play_video/play_music/play_playlist, which do, and go through the
+-- normal event -> startup.lua's remoteMenuWatcher path same as before).
+-- _G.MOVCCTWX_PLAYLIST is a plain shared table (see startup.lua) -- both
+-- these handlers and the computer's own Playlist screen
+-- (musicplayer.lua) mutate the SAME table in place.
+--
+-- Every ack carries the CURRENT _G.MOVCCTWX_STATUS and
+-- _G.MOVCCTWX_PLAYLIST snapshots (status kept up to date by
+-- videoplayer.lua/musicplayer.lua while something's playing -- see their
+-- comments), so the pocket computer can show live title/paused/elapsed/
+-- volume and the current playlist contents without a second round-trip
+-- after every command.
 --
 -- Run M.listen(config) as one branch of parallel.waitForAny/waitForAll
 -- alongside whatever menu/player loop is active -- it never returns on its
 -- own.
 
 local M = {}
+
+local NO_NAVIGATE_ACTIONS = { get_status = true, playlist_add = true, playlist_remove = true }
+
+local function handlePlaylistAdd(song)
+    if type(song) ~= "table" or not song.name then return end
+    for _, existing in ipairs(_G.MOVCCTWX_PLAYLIST) do
+        if existing.name == song.name then return end -- already on the playlist
+    end
+    table.insert(_G.MOVCCTWX_PLAYLIST, song)
+end
+
+local function handlePlaylistRemove(name)
+    for i, existing in ipairs(_G.MOVCCTWX_PLAYLIST) do
+        if existing.name == name then
+            table.remove(_G.MOVCCTWX_PLAYLIST, i)
+            return
+        end
+    end
+end
 
 local function openModems()
     local opened = false
@@ -60,10 +92,14 @@ function M.listen(config)
         local senderId, message = rednet.receive(config.REMOTE_PROTOCOL)
         if type(message) == "table" and message.action then
             if isAllowed(config, senderId) then
-                if message.action ~= "get_status" then
+                if message.action == "playlist_add" then
+                    handlePlaylistAdd(message.song)
+                elseif message.action == "playlist_remove" then
+                    handlePlaylistRemove(message.name)
+                elseif not NO_NAVIGATE_ACTIONS[message.action] then
                     os.queueEvent("movcctwx_remote_action", message.action, message.name)
                 end
-                rednet.send(senderId, { ok = true, status = _G.MOVCCTWX_STATUS }, config.REMOTE_PROTOCOL)
+                rednet.send(senderId, { ok = true, status = _G.MOVCCTWX_STATUS, playlist = _G.MOVCCTWX_PLAYLIST }, config.REMOTE_PROTOCOL)
             else
                 -- Not on the allowlist -- reject, and print the ID so the
                 -- owner can add it to config.lua's REMOTE_ALLOWLIST without

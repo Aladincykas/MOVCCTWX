@@ -108,7 +108,11 @@ end
 -- wall: the 12-monitor wall (see wall.lua), used for the full-screen
 -- equalizer while a song plays. Text/controls always stay on `mon`
 -- (the computer's own screen) regardless of whether a wall was given.
-function M.run(mon, speakers, config, frame, startSongName, wall)
+-- startWithPlaylist: optional -- when true, immediately plays through the
+-- current playlist (see below) instead of opening the library screen
+-- first, for a remote "play_playlist" command. Falls through to the
+-- normal library screen if the playlist is empty.
+function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlaylist)
     local w, h = mon.getSize()
     local manifestUrls = buildManifestUrls(config)
 
@@ -118,13 +122,17 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
     -- back to the library screen.
     local exitReason = nil
 
-    -- The playlist: an in-memory array of song tables (same shape as
-    -- entries from songs.json), built up by tapping songs on the "Add to
-    -- Playlist" screen. Lives for the whole M.run() session (persists
-    -- across screen switches, cleared only if the whole music player is
-    -- re-entered from the main menu) -- there's no persistence to disk,
-    -- same as the rest of this session's transient UI state.
-    local playlist = {}
+    -- The playlist: a table of song tables (same shape as entries from
+    -- songs.json), built up by tapping songs on the "Add to Playlist"
+    -- screen OR by a remote playlist_add command. This is a SHARED,
+    -- program-lifetime table (_G.MOVCCTWX_PLAYLIST, initialized once in
+    -- startup.lua) -- not a fresh local like the old single-session
+    -- version -- so a song added remotely while sitting on the main menu
+    -- (nothing "playlist" even open yet) is still there next time Music
+    -- is entered, and the computer's own Playlist screen and remote
+    -- commands are always looking at the exact same list. There's still
+    -- no persistence to disk -- it resets if the whole computer reboots.
+    local playlist = _G.MOVCCTWX_PLAYLIST
 
     -- Idle watcher: reusable, but scheduled FRESH inside whichever
     -- basalt.run() session is actually pumping events (once at the top of
@@ -589,6 +597,20 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
         return playReason
     end
 
+    -- Plays every song on the playlist in order (auto-advancing), same
+    -- logic the Playlist screen's "Play All" button already used -- pulled
+    -- out into its own function so both that button AND a remote
+    -- "play_playlist" command (see startWithPlaylist below) can trigger
+    -- the exact same behavior instead of duplicating it.
+    local function playThroughPlaylist()
+        local i = 1
+        while i <= #playlist and not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+            local reason = playSong(playlist[i], "Back to Playlist")
+            if reason ~= "finished" then break end
+            i = i + 1
+        end
+    end
+
     -- ==== Library list (paginated, tappable rows) ====
     local ROW_STEP = 2 -- 1 row for the button + 1 row gap, for touch accuracy and readability
     local contentTop = 4
@@ -951,6 +973,8 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
             if s.name == startSongName then match = s break end
         end
         if match then playSong(match) end
+    elseif startWithPlaylist and #playlist > 0 then
+        playThroughPlaylist()
     end
 
     local screen = "library" -- "library" | "playlist" | "addSongs"
@@ -993,12 +1017,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
             elseif playlistAction == "back" then
                 screen = "library"
             elseif playlistAction == "play" and #playlist > 0 and not _G.MOVCCTWX_TERMINATED then
-                local i = 1
-                while i <= #playlist and not exitReason and not _G.MOVCCTWX_TERMINATED do
-                    local reason = playSong(playlist[i], "Back to Playlist")
-                    if reason ~= "finished" then break end
-                    i = i + 1
-                end
+                playThroughPlaylist()
                 -- Whether it played through to the end, got stopped, or
                 -- one song errored out, land back on the playlist screen
                 -- (not the library) -- exitReason (idle/quit/menu) still

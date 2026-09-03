@@ -28,19 +28,24 @@ local function findBrain()
 end
 
 -- Sends one command and waits briefly for the brain's ok/reject reply.
--- Returns true, nil, status on success (status is the brain's current
--- _G.MOVCCTWX_STATUS snapshot -- see remote.lua -- attached to every ack,
+-- Returns true, nil, status, playlist on success (status is the brain's
+-- current _G.MOVCCTWX_STATUS snapshot, playlist its current
+-- _G.MOVCCTWX_PLAYLIST -- see remote.lua -- both attached to every ack,
 -- not just get_status's); false, reason on rejection/timeout.
-local function send(brainId, action, name)
-    rednet.send(brainId, { action = action, name = name }, config.REMOTE_PROTOCOL)
-    local senderId, message = rednet.receive(config.REMOTE_PROTOCOL, 3)
-    if senderId ~= brainId or type(message) ~= "table" then
+-- extra: optional table of additional fields merged into the message
+-- (playlist_add's `song`, for instance).
+local function send(brainId, action, name, extra)
+    local message = { action = action, name = name }
+    if extra then for k, v in pairs(extra) do message[k] = v end end
+    rednet.send(brainId, message, config.REMOTE_PROTOCOL)
+    local senderId, reply = rednet.receive(config.REMOTE_PROTOCOL, 3)
+    if senderId ~= brainId or type(reply) ~= "table" then
         return false, "no response (brain offline or out of range)"
     end
-    if not message.ok then
-        return false, message.reason or "rejected"
+    if not reply.ok then
+        return false, reply.reason or "rejected"
     end
-    return true, nil, message.status
+    return true, nil, reply.status, reply.playlist
 end
 
 local function formatTime(seconds)
@@ -84,7 +89,11 @@ end
 
 -- Simple up/down/enter list picker. Returns the chosen item, or nil if the
 -- user backed out with Q.
-local function pickFromList(title, items, labelFn)
+-- onAdd: optional -- if given, pressing A calls onAdd(items[selected])
+-- and STAYS on this screen (doesn't return), for "add to playlist without
+-- losing your place browsing" -- unlike Enter (play) or Q (back), which
+-- both end the picker.
+local function pickFromList(title, items, labelFn, onAdd)
     local w, h = term.getSize()
     local top = 3
     local perPage = h - top - 1
@@ -120,7 +129,7 @@ local function pickFromList(title, items, labelFn)
         term.setTextColor(colors.lightGray)
         term.setCursorPos(1, h)
         term.clearLine()
-        term.write("Up/Down Enter=play Q=back")
+        term.write(onAdd and "Up/Down Enter=play A=add Q=back" or "Up/Down Enter=play Q=back")
 
         local event, key = os.pullEvent("key")
         if key == keys.up then
@@ -129,6 +138,8 @@ local function pickFromList(title, items, labelFn)
             selected = math.min(#items, selected + 1)
         elseif key == keys.enter and #items > 0 then
             return items[selected]
+        elseif key == keys.a and onAdd and #items > 0 then
+            onAdd(items[selected])
         elseif key == keys.q then
             return nil
         end
@@ -193,6 +204,73 @@ local function transportScreen(brainId, kind, name, initialStatus)
     end
 end
 
+-- Playlist screen: view the current (shared -- see remote.lua/
+-- musicplayer.lua) playlist, remove songs from it, or play through the
+-- whole thing. A digit key (1-9) removes that row directly -- no up/down
+-- selector here, the screen's too small for a cursor AND a remove button
+-- per row at once. P plays the whole playlist and hands off to the same
+-- transportScreen used for a single song (musicplayer.lua's
+-- _G.MOVCCTWX_STATUS already reports whichever song is CURRENTLY playing
+-- within the playlist, so the generic transport screen just works here
+-- too, title and all).
+-- playlist: the initial contents (from whatever get_status/play_* call
+-- got us here) -- refetched after every remove so this stays accurate.
+local function playlistScreen(brainId, playlist)
+    while true do
+        local w, h = term.getSize()
+        local top = 3
+        local perPage = h - top - 2
+
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+        centerText(1, "PLAYLIST", colors.lime)
+        if #playlist == 0 then
+            centerText(top, "(empty -- add songs from Music Player)", colors.gray)
+        else
+            for i = 1, math.min(perPage, #playlist) do
+                local song = playlist[i]
+                term.setCursorPos(1, top + i - 1)
+                term.setBackgroundColor(colors.black)
+                term.setTextColor(colors.white)
+                term.clearLine()
+                term.write((" %d. %s"):format(i, song.name):sub(1, w))
+            end
+        end
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.lightGray)
+        term.setCursorPos(1, h - 1)
+        term.clearLine()
+        term.write("Press a number to remove that song")
+        term.setCursorPos(1, h)
+        term.clearLine()
+        term.write("P=play all  Q=back")
+
+        local event, key = os.pullEvent("key")
+        if key == keys.p and #playlist > 0 then
+            local ok, reason, status = send(brainId, "play_playlist")
+            if ok then
+                transportScreen(brainId, "music", (status and status.name) or "Playlist", status)
+                local _, _, _, newPlaylist = send(brainId, "get_status")
+                playlist = newPlaylist or playlist
+            else
+                flash("Rejected: " .. tostring(reason), false)
+            end
+        elseif key == keys.q then
+            return
+        elseif key >= keys.one and key <= keys.nine then
+            -- keys.one..keys.nine are consecutive in CC:Tweaked's keys
+            -- table, hence the arithmetic instead of 9 separate branches.
+            local digit = key - keys.one + 1
+            if playlist[digit] then
+                local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", playlist[digit].name)
+                if ok then playlist = newPlaylist or playlist
+                else flash("Rejected: " .. tostring(reason), false) end
+            end
+        end
+    end
+end
+
 -- ==== Main ====
 openModem()
 flash("Looking for " .. config.TITLE .. "...", true)
@@ -209,7 +287,8 @@ while true do
     centerText(2, config.TITLE, colors.lime)
     centerText(5, "1) Video Player", colors.white)
     centerText(6, "2) Music Player", colors.white)
-    centerText(8, "Q) Quit", colors.lightGray)
+    centerText(7, "3) Playlist", colors.white)
+    centerText(9, "Q) Quit", colors.lightGray)
 
     local event, key = os.pullEvent("key")
     if key == keys.one then
@@ -222,12 +301,19 @@ while true do
         end
     elseif key == keys.two then
         local songs = fetchMergedManifest(config.MUSIC_LIBRARIES, "songs.json")
-        local song = pickFromList("MUSIC", songs, function(s) return s.name end)
+        local song = pickFromList("MUSIC", songs, function(s) return s.name end, function(s)
+            local ok, reason = send(brainId, "playlist_add", nil, { song = s })
+            flash(ok and ("Added: " .. s.name) or ("Rejected: " .. tostring(reason)), ok)
+        end)
         if song then
             local ok, reason, status = send(brainId, "play_music", song.name)
             if ok then transportScreen(brainId, "music", song.name, status)
             else flash("Rejected: " .. tostring(reason), false) end
         end
+    elseif key == keys.three then
+        local ok, reason, _, playlist = send(brainId, "get_status")
+        if ok then playlistScreen(brainId, playlist or {})
+        else flash("Rejected: " .. tostring(reason), false) end
     elseif key == keys.q then
         break
     end
