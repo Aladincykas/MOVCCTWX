@@ -29,6 +29,7 @@ local FILES = {
     "/remote.lua",
     "/musicplayer.lua",
     "/wallviz.lua",
+    "/idlescreen.lua",
     "/videoplayer.lua",
     "/settings.lua",
     "/basalt.lua",

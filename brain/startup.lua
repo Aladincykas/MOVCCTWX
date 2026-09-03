@@ -229,8 +229,35 @@ local function runMainMenu()
     -- (remoteMenuWatcher), not here -- see its comment for why a per-screen
     -- listener like this used to be, and why that was a real bug.
 
+    -- Idle clock on the wall while this menu is up.
+    --
+    -- Twelve monitors sitting black is a waste of the most visible thing in
+    -- the build, and the menu is where the brain spends most of its time.
+    -- Scheduled rather than run inline so Basalt keeps handling clicks, and
+    -- pcall'd so a wall problem (a monitor broken off, say) leaves the menu
+    -- perfectly usable instead of taking it down -- the clock is decoration,
+    -- the menu is not.
+    basalt.schedule(function()
+        local ok = pcall(function()
+            local idlescreen = require("idlescreen")
+            local wall = getWall("music")
+            idlescreen.run(wall, function()
+                return chosen ~= nil or _G.MOVCCTWX_TERMINATED
+            end)
+        end)
+        if not ok then return end
+    end)
+
     frame:draw()
     basalt.run()
+
+    -- Leave the wall black on the way out, or the clock's last frame stays
+    -- burned there underneath whatever plays next.
+    pcall(function()
+        local wall = getWall("music")
+        wall.setBackgroundColor(colors.black)
+        wall.clear()
+    end)
 
     if _G.MOVCCTWX_TERMINATED then return "quit" end
     return chosen or "video"
