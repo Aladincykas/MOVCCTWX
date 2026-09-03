@@ -251,7 +251,7 @@ end
 -- frame while waiting for the first poll.
 local function transportScreen(brainId, kind, name, initialStatus)
     local status = initialStatus
-    local nameLabel, statusLabel, playPauseBtn
+    local nameLabel, nameLabel2, statusLabel, playPauseBtn
     local playlistHeader, playlistLabels = nil, {}
 
     -- Centers a label horizontally at row y, given its CURRENT text --
@@ -275,13 +275,18 @@ local function transportScreen(brainId, kind, name, initialStatus)
         -- underneath. Confirmed in-game: title was stuck on "Playlist"
         -- for the whole session instead of following the actual song.
         local displayName = (status and status.screen == kind and status.name) or name
-        centerLabel(nameLabel, 3, displayName)
+        -- Two rows, same as the list screen: at 26 characters wide a single
+        -- row cut "My life be like - Tokyo Drift Video" down to something
+        -- that could be any of several videos.
+        local titleLines = wrapLabel(displayName, w)
+        centerLabel(nameLabel, 3, titleLines[1] or "")
+        centerLabel(nameLabel2, 4, titleLines[2] or "")
         if status and status.screen == kind then
-            centerLabel(statusLabel, 4, (status.paused and "|| " or "> ") .. formatTime(status.elapsedSec)
+            centerLabel(statusLabel, 5, (status.paused and "|| " or "> ") .. formatTime(status.elapsedSec)
                 .. "  " .. (status.volumePct or 0) .. "%")
             playPauseBtn:setText(status.paused and "Play" or "Pause")
         else
-            centerLabel(statusLabel, 4, "(connecting...)")
+            centerLabel(statusLabel, 5, "(connecting...)")
         end
     end
 
@@ -290,6 +295,7 @@ local function transportScreen(brainId, kind, name, initialStatus)
     frame:addLabel():setText((kind == "video" and "DIDZIULIS EKRANAS" or "MUSIC"):sub(1, w))
         :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
     nameLabel = frame:addLabel():setForeground(colors.white):setBackground(colors.black)
+    nameLabel2 = frame:addLabel():setForeground(colors.white):setBackground(colors.black)
     statusLabel = frame:addLabel():setForeground(colors.lightGray):setBackground(colors.black)
 
     -- Button pairs centered as a GROUP, not started hard against column 1
@@ -299,13 +305,13 @@ local function transportScreen(brainId, kind, name, initialStatus)
     local pairW = btnW * 2 + 2
     local bx = math.max(1, math.floor((w - pairW) / 2) + 1)
     local bx2 = bx + btnW + 2
-    playPauseBtn = frame:addButton():setText("--"):setPosition(bx, 6):setSize(btnW, 1)
+    playPauseBtn = frame:addButton():setText("--"):setPosition(bx, 7):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, reason, newStatus = send(brainId, "playpause")
             if ok then status = newStatus updateLabels() else flash("Rejected: " .. tostring(reason), false) basalt.stop() end
         end)
-    frame:addButton():setText("Stop"):setPosition(bx2, 6):setSize(btnW, 1)
+    frame:addButton():setText("Stop"):setPosition(bx2, 7):setSize(btnW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function()
             local ok, reason = send(brainId, "stop")
@@ -313,13 +319,30 @@ local function transportScreen(brainId, kind, name, initialStatus)
             basalt.stop()
         end)
 
-    frame:addButton():setText("Vol -"):setPosition(bx, 8):setSize(btnW, 1)
+    -- Coarse volume on its own row above the fine one. The 1% steps are
+    -- unusable on their own: the scale runs to 300%, so moving from 80% to
+    -- a normal 33% took forty-odd taps. The brain already understood
+    -- vol-10/vol+10 for exactly this -- only the remote never offered them.
+    frame:addButton():setText("Vol --"):setPosition(bx, 9):setSize(btnW, 1)
+        :setBackground(colors.gray):setForeground(colors.orange)
+        :onClick(function()
+            local ok, _, newStatus = send(brainId, "vol-10")
+            if ok then status = newStatus updateLabels() end
+        end)
+    frame:addButton():setText("Vol ++"):setPosition(bx2, 9):setSize(btnW, 1)
+        :setBackground(colors.gray):setForeground(colors.orange)
+        :onClick(function()
+            local ok, _, newStatus = send(brainId, "vol+10")
+            if ok then status = newStatus updateLabels() end
+        end)
+
+    frame:addButton():setText("Vol -"):setPosition(bx, 11):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, _, newStatus = send(brainId, "vol-1")
             if ok then status = newStatus updateLabels() end
         end)
-    frame:addButton():setText("Vol +"):setPosition(bx2, 8):setSize(btnW, 1)
+    frame:addButton():setText("Vol +"):setPosition(bx2, 11):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, _, newStatus = send(brainId, "vol+1")
@@ -344,7 +367,7 @@ local function transportScreen(brainId, kind, name, initialStatus)
     -- half the remote's screen and implying a feature that does not exist.
     -- The same screen serves both, so it just leaves this part out for
     -- video and the transport controls sit on their own.
-    local plTop, plBottom = 10, h - 1
+    local plTop, plBottom = 13, h - 1
     local plCapacity = (kind == "music") and math.max(0, plBottom - plTop) or 0
     if plCapacity > 0 then
         playlistHeader = frame:addLabel():setPosition(1, plTop):setForeground(colors.lime):setBackground(colors.black)

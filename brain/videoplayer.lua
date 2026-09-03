@@ -187,6 +187,12 @@ function M.play(wall, screen, speakers, entry, config)
     -- two is what is sitting in the speaker's buffer -- i.e. how far behind
     -- the sound you hear is from where the player thinks it is.
     local audioQueuedSec = 0
+    -- When audioElapsedSec last actually moved. The picture paces to the
+    -- sound, so if the audio stream stalls -- a slow read, a hiccup fetching
+    -- the next part -- the clock it follows simply stops, and the video
+    -- freezes for exactly as long as the stall lasts. Tracking this lets the
+    -- picture carry on rather than waiting indefinitely.
+    local audioAdvancedMs = os.epoch("utc")
     local audioFinished = false
 
     -- How much audio may sit in the speakers unheard. playAudio accepts
@@ -241,7 +247,18 @@ function M.play(wall, screen, speakers, entry, config)
         -- was tried and produced a slideshow, because the renderer could not
         -- catch up and so skipped nearly everything. Waiting when ahead is
         -- safe; skipping when behind is not.
-        if hasSeparateAudio and audioElapsedSec > 0 then return audioElapsedSec end
+        if hasSeparateAudio and audioElapsedSec > 0 then
+            -- A brief gap is normal between blocks, so allow some slack. Past
+            -- that the audio has genuinely stopped advancing, and continuing
+            -- to wait would freeze the picture for the whole stall -- so keep
+            -- the picture moving on real time instead, and let it re-sync to
+            -- the sound as soon as audio starts flowing again.
+            local stalledMs = (os.epoch("utc") - audioAdvancedMs) - 1500
+            if stalledMs > 0 and not state.paused then
+                return audioElapsedSec + stalledMs / 1000
+            end
+            return audioElapsedSec
+        end
         return (os.epoch("utc") - playStartMs - pausedMs) / 1000
     end
 
@@ -344,6 +361,7 @@ function M.play(wall, screen, speakers, entry, config)
                     audioQueuedSec = spanStartSec + spanBytes / DFPWM_BYTES_PER_SECOND
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
+                    audioAdvancedMs = os.epoch("utc")
                 end
 
                 response.close()
