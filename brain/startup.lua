@@ -97,6 +97,17 @@ end
 -- Same reuse-one-frame pattern as the reference project: createFrame()
 -- appends to a module-level list with no "destroy" call anywhere, so this
 -- clears a frame's own children instead of leaking a new frame per screen.
+-- Wipes the physical screen AND resets Basalt's render cache before a
+-- screen is rebuilt -- see musicplayer.lua's identical helper for the
+-- full explanation (short version: clearing the widgets alone isn't
+-- enough, Basalt skips repainting cells it thinks are unchanged, which
+-- makes near-identical consecutive screens render half-blank).
+local function resetScreen()
+    term.setBackgroundColor(colors.black)
+    term.clear()
+    frame:setTerm(term)
+end
+
 local function clearFrameChildren(f)
     local children = rawget(f, "_children")
     while children and #children > 0 do
@@ -137,6 +148,7 @@ end
 local w, h = frame:getSize()
 local function runMainMenu()
     local chosen = nil
+    resetScreen()
     clearFrameChildren(frame)
 
     local title = config.TITLE
@@ -189,6 +201,7 @@ local function runMainMenu()
         :setBackground(colors.gray)
         :setForeground(colors.lime)
         :onClick(function()
+            resetScreen()
             clearFrameChildren(frame)
             local status = _G.MOVCCTWX_STATUS
             local msg = (status and (status.screen == "video" or status.screen == "music"))
@@ -233,6 +246,7 @@ local function runVideoMenu()
         local totalPages = math.max(1, math.ceil(#videos / perPage))
 
         local function draw()
+            resetScreen()
             clearFrameChildren(frame)
             if page > totalPages then page = totalPages end
 

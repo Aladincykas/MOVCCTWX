@@ -50,6 +50,26 @@ local function fetchSongs(manifestUrls)
     return songs, errors
 end
 
+-- Wipes the physical screen AND resets Basalt's render cache, before
+-- rebuilding a screen's widgets. clearFrameChildren alone is NOT enough:
+-- Basalt only repaints cells it believes changed, judged against what IT
+-- last drew. Two consecutive songs' Now Playing screens are nearly
+-- identical (same title bar, same panel, same button labels in the same
+-- places), so Basalt skips repainting all of that -- but the physical
+-- screen was blanked in between, leaving those cells empty. The result:
+-- only the parts that genuinely differ between songs (the song name, the
+-- ticking timer) actually get drawn, and everything else vanishes --
+-- confirmed in-game as exactly this, on the second song of a playlist.
+-- setTerm() is what resets the cache so the next draw() treats every cell
+-- as dirty. This is the same fix the original Komanda X project used for
+-- the same class of bug (see its hub.lua notes on leftover/skipped
+-- repaints).
+local function resetScreen(mon, frame)
+    mon.setBackgroundColor(colors.black)
+    mon.clear()
+    frame:setTerm(mon)
+end
+
 -- Same pattern as hub.lua's clearFrameChildren -- see the comment there for
 -- why frames get reused instead of recreated (createFrame() never gets
 -- cleaned up, and its click router keeps dispatching to every frame it's
@@ -313,6 +333,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         -- equalizer, which doesn't apply once the equalizer isn't on this
         -- screen at all).
         local function drawNowPlaying()
+            resetScreen(mon, frame)
             clearFrameChildren(frame)
 
             f:addLabel()
@@ -783,6 +804,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     local nextScreen = nil
 
     local function drawLibrary()
+        resetScreen(mon, frame)
         clearFrameChildren(frame)
         local f = frame
         local totalPages = math.max(1, math.ceil(#songs / perPage))
@@ -927,6 +949,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     local playlistAction = nil -- set by a footer button: "play" | "add" | "back"
 
     local function drawPlaylist()
+        resetScreen(mon, frame)
         clearFrameChildren(frame)
         local f = frame
         local totalPages = math.max(1, math.ceil(#playlist / playlistPerPage))
@@ -1039,6 +1062,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     local addPage = 1
 
     local function drawAddSongs()
+        resetScreen(mon, frame)
         clearFrameChildren(frame)
         local f = frame
         local totalPages = math.max(1, math.ceil(#songs / perPage))

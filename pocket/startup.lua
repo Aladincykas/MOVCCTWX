@@ -80,6 +80,17 @@ local w, h = frame:getSize()
 -- Same reuse-one-frame pattern as the brain computer -- createFrame()
 -- appends to a module-level list with no "destroy" call anywhere, so this
 -- clears a frame's own children instead of leaking a new frame per screen.
+-- Wipes the physical screen AND resets Basalt's render cache before a
+-- screen is rebuilt. Clearing the widgets alone isn't enough -- Basalt
+-- only repaints cells it believes changed since IT last drew them, so two
+-- near-identical consecutive screens can render half-blank. Same fix (and
+-- same root cause) as the brain computer's resetScreen.
+local function resetScreen()
+    term.setBackgroundColor(colors.black)
+    term.clear()
+    frame:setTerm(term)
+end
+
 local function clearFrameChildren(f)
     local children = rawget(f, "_children")
     while children and #children > 0 do
@@ -90,6 +101,7 @@ local function clearFrameChildren(f)
 end
 
 local function flash(text, ok)
+    resetScreen()
     clearFrameChildren(frame)
     frame:addLabel()
         :setText(text:sub(1, w))
@@ -114,6 +126,7 @@ local function listScreen(title, items, labelFn, onAdd)
     local result = nil
 
     local function draw()
+        resetScreen()
         clearFrameChildren(frame)
         if page > math.max(1, math.ceil(#items / perPage)) then page = 1 end
         local totalPages = math.max(1, math.ceil(#items / perPage))
@@ -212,20 +225,27 @@ local function transportScreen(brainId, kind, name, initialStatus)
         end
     end
 
+    resetScreen()
     clearFrameChildren(frame)
     frame:addLabel():setText((kind == "video" and "DIDZIULIS EKRANAS" or "MUSIC"):sub(1, w))
         :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
     nameLabel = frame:addLabel():setForeground(colors.white):setBackground(colors.black)
     statusLabel = frame:addLabel():setForeground(colors.lightGray):setBackground(colors.black)
 
+    -- Button pairs centered as a GROUP, not started hard against column 1
+    -- -- with a fixed x=1 start the pair ended short of the right edge and
+    -- read as shoved to the left.
     local btnW = math.max(4, math.floor((w - 4) / 2))
-    playPauseBtn = frame:addButton():setText("--"):setPosition(1, 6):setSize(btnW, 1)
+    local pairW = btnW * 2 + 2
+    local bx = math.max(1, math.floor((w - pairW) / 2) + 1)
+    local bx2 = bx + btnW + 2
+    playPauseBtn = frame:addButton():setText("--"):setPosition(bx, 6):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, reason, newStatus = send(brainId, "playpause")
             if ok then status = newStatus updateLabels() else flash("Rejected: " .. tostring(reason), false) basalt.stop() end
         end)
-    frame:addButton():setText("Stop"):setPosition(2 + btnW, 6):setSize(btnW, 1)
+    frame:addButton():setText("Stop"):setPosition(bx2, 6):setSize(btnW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function()
             local ok, reason = send(brainId, "stop")
@@ -233,13 +253,13 @@ local function transportScreen(brainId, kind, name, initialStatus)
             basalt.stop()
         end)
 
-    frame:addButton():setText("Vol -"):setPosition(1, 8):setSize(btnW, 1)
+    frame:addButton():setText("Vol -"):setPosition(bx, 8):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, _, newStatus = send(brainId, "vol-1")
             if ok then status = newStatus updateLabels() end
         end)
-    frame:addButton():setText("Vol +"):setPosition(2 + btnW, 8):setSize(btnW, 1)
+    frame:addButton():setText("Vol +"):setPosition(bx2, 8):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function()
             local ok, _, newStatus = send(brainId, "vol+1")
@@ -266,17 +286,16 @@ local function transportScreen(brainId, kind, name, initialStatus)
         end
     end
 
+    -- Header and each queued song are centered (recentered on every
+    -- update, since the text length changes as the queue changes) to
+    -- match how the title/status above them are laid out.
     local function updatePlaylist(playlist)
         if not playlistHeader then return end
         playlist = playlist or {}
-        playlistHeader:setText(("Playlist (%d):"):format(#playlist):sub(1, w))
+        centerLabel(playlistHeader, plTop, ("Queue (%d)"):format(#playlist))
         for i = 1, plCapacity do
             local song = playlist[i]
-            if song then
-                playlistLabels[i]:setText(song.name:sub(1, w))
-            else
-                playlistLabels[i]:setText("")
-            end
+            centerLabel(playlistLabels[i], plTop + i, song and song.name or "")
         end
     end
 
@@ -321,6 +340,7 @@ local function playlistScreen(brainId, playlist)
     local page = 1
 
     local function draw()
+        resetScreen()
         clearFrameChildren(frame)
         local totalPages = math.max(1, math.ceil(#playlist / perPage))
         if page > totalPages then page = totalPages end
@@ -405,27 +425,38 @@ if not brainId then
 end
 
 while true do
+    resetScreen()
     clearFrameChildren(frame)
-    frame:addLabel():setText(config.TITLE:sub(1, w)):setPosition(math.max(1, math.floor((w - #config.TITLE) / 2) + 1), 1)
-        :setForeground(colors.lime):setBackground(colors.black)
 
     local buttonW = math.min(w - 2, 20)
     local bx = math.max(1, math.floor((w - buttonW) / 2) + 1)
     local chosen = nil
 
-    frame:addButton():setText("Video Player"):setPosition(bx, 4):setSize(buttonW, 1)
+    -- Whole block (title + 5 buttons) centered vertically as one unit
+    -- rather than pinned to the top with all the empty space dumped at
+    -- the bottom.
+    local BLOCK_HEIGHT = 12 -- title(1) gap(2) 5 buttons w/ 1-row gaps (9)
+    local blockTop = math.max(1, math.floor((h - BLOCK_HEIGHT) / 2) + 1)
+    local titleY = blockTop
+    local btnY = { blockTop + 3, blockTop + 5, blockTop + 7, blockTop + 9, blockTop + 11 }
+
+    frame:addLabel():setText(config.TITLE:sub(1, w))
+        :setPosition(math.max(1, math.floor((w - math.min(#config.TITLE, w)) / 2) + 1), titleY)
+        :setForeground(colors.lime):setBackground(colors.black)
+
+    frame:addButton():setText("Video Player"):setPosition(bx, btnY[1]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "video" basalt.stop() end)
-    frame:addButton():setText("Music Player"):setPosition(bx, 6):setSize(buttonW, 1)
+    frame:addButton():setText("Music Player"):setPosition(bx, btnY[2]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "music" basalt.stop() end)
-    frame:addButton():setText("Playlist"):setPosition(bx, 8):setSize(buttonW, 1)
+    frame:addButton():setText("Playlist"):setPosition(bx, btnY[3]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "playlist" basalt.stop() end)
-    frame:addButton():setText("Now Playing"):setPosition(bx, 10):setSize(buttonW, 1)
+    frame:addButton():setText("Now Playing"):setPosition(bx, btnY[4]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "nowplaying" basalt.stop() end)
-    frame:addButton():setText("Quit"):setPosition(bx, 12):setSize(buttonW, 1)
+    frame:addButton():setText("Quit"):setPosition(bx, btnY[5]):setSize(buttonW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function() chosen = "quit" basalt.stop() end)
 
