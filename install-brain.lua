@@ -51,17 +51,26 @@ local function download(url, destPath)
     end
     local body = response.readAll()
     response.close()
+    if not body or #body == 0 then
+        error(("Downloaded %s but it was EMPTY -- refusing to overwrite."):format(url))
+    end
     local f = fs.open(destPath, "w")
     f.write(body)
     f.close()
+    -- Report the size actually written. "I reinstalled and it still behaves
+    -- like the old version" has come up more than once, and without this
+    -- there is no way to tell whether the file on disk changed at all --
+    -- a stale cache, a failed write and a genuine no-op all look identical.
+    -- Comparing this number against the file on GitHub settles it instantly.
+    return #body
 end
 
 print("Installing MOVCCTWX brain computer files into / ...")
 if not fs.exists("/vendor") then fs.makeDir("/vendor") end
 
 for _, absPath in ipairs(FILES) do
-    print("  " .. absPath)
-    download(BASE_URL .. absPath:sub(2), absPath)
+    local size = download(BASE_URL .. absPath:sub(2), absPath)
+    print(("  %s  %d B"):format(absPath, size))
 end
 
 -- CC:Tweaked caches require()'d modules in memory for the whole computer
