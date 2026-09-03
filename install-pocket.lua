@@ -10,9 +10,13 @@ local GITHUB_USER = "Aladincykas"
 local REPO = "MOVCCTWX"
 local BRANCH = "main"
 
+-- Absolute destination paths -- see install-brain.lua's comment on the
+-- same FILES table for why relative paths here would be a real bug
+-- (writes into whatever the shell's current directory happens to be,
+-- instead of always overwriting the real files at root).
 local FILES = {
-    "startup.lua",
-    "config.lua",
+    "/startup.lua",
+    "/config.lua",
 }
 
 local BASE_URL = ("https://raw.githubusercontent.com/%s/%s/%s/pocket/"):format(GITHUB_USER, REPO, BRANCH)
@@ -29,11 +33,11 @@ local function download(url, destPath)
     f.close()
 end
 
-print("Installing MOVCCTWX pocket remote files...")
+print("Installing MOVCCTWX pocket remote files into / ...")
 
-for _, relPath in ipairs(FILES) do
-    print("  " .. relPath)
-    download(BASE_URL .. relPath, relPath)
+for _, absPath in ipairs(FILES) do
+    print("  " .. absPath)
+    download(BASE_URL .. absPath:sub(2), absPath)
 end
 
 print("\nDone. Run 'startup.lua' now, or reboot to auto-start it.")
