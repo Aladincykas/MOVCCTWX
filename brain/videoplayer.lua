@@ -184,6 +184,9 @@ function M.play(wall, screen, speakers, entry, config)
     local DFPWM_BYTES_PER_SECOND = 6000
     local audioElapsedSec = 0
     local audioFinished = false
+    -- Set when the last video chunk is done, so the audio stream stops with
+    -- it rather than holding playback open to the end of the soundtrack.
+    local videoDone = false
 
     -- Only the FIRST chunk is a real wait. Every chunk after it is fetched
     -- in the background while the previous one is still playing (see the
@@ -226,7 +229,7 @@ function M.play(wall, screen, speakers, entry, config)
             -- A fresh decoder per file: DFPWM is stateful, and each file was
             -- encoded as its own stream, so state must not carry across.
             local decoder = dfpwm.make_decoder()
-            while not state.stopRequested do
+            while not state.stopRequested and not videoDone do
                 local data = response.read(16 * 1024)
                 if not data then break end
                 while state.paused and not state.stopRequested do
@@ -272,293 +275,298 @@ function M.play(wall, screen, speakers, entry, config)
     local file = fetchChunkToMemory(entry.chunks[1])
     local nextFile = nil
 
-    for chunkIndex = 1, #entry.chunks do
-        if state.stopRequested then break end
+    -- The chunk loop and the audio stream run alongside each other for the
+    -- whole video. Starting the audio inside a chunk's own parallel block
+    -- deadlocked playback: that block waits for every branch, and the audio
+    -- branch covers the entire soundtrack -- so once the first chunk's video
+    -- ended, the picture froze there until the whole song had finished, while
+    -- audio carried on. Confirmed in-game.
+    local function videoLoop()
+        for chunkIndex = 1, #entry.chunks do
+            if state.stopRequested then break end
 
-        -- Normally already prefetched. This only runs if a prefetch
-        -- failed (it's pcall'd below, so a hiccup downgrades to fetching
-        -- here rather than killing playback).
-        if not file then
-            drawStatus(screen, ("Loading %s (part %d/%d)..."):format(entry.name, chunkIndex, #entry.chunks))
-            file = fetchChunkToMemory(entry.chunks[chunkIndex])
-        end
+            -- Normally already prefetched. This only runs if a prefetch
+            -- failed (it's pcall'd below, so a hiccup downgrades to fetching
+            -- here rather than killing playback).
+            if not file then
+                drawStatus(screen, ("Loading %s (part %d/%d)..."):format(entry.name, chunkIndex, #entry.chunks))
+                file = fetchChunkToMemory(entry.chunks[chunkIndex])
+            end
 
-        local function saveVolume()
-            savedSettings.videoVolume = state.volume
-            settings.save(savedSettings)
-        end
-        local function adjustVolume(deltaFraction)
-            local step = deltaFraction * state.maxVolume
-            state.volume = math.max(0, math.min(state.maxVolume, state.volume + step))
-            saveVolume()
-        end
+            local function saveVolume()
+                savedSettings.videoVolume = state.volume
+                settings.save(savedSettings)
+            end
+            local function adjustVolume(deltaFraction)
+                local step = deltaFraction * state.maxVolume
+                state.volume = math.max(0, math.min(state.maxVolume, state.volume + step))
+                saveVolume()
+            end
 
-        local fps = 10
-        local lastPalette, lastRows = {}, {}
-        local framesPlayed = 0
-        local framesDropped = 0
-        local lastControlsDraw = 0
+            local fps = 10
+            local lastPalette, lastRows = {}, {}
+            local framesPlayed = 0
+            local framesDropped = 0
+            local lastControlsDraw = 0
 
-        local audioQueue = {}
-        local audioQueueTail = 0
-        local audioQueueHead = 1
-        local decodeFinished = false
+            local audioQueue = {}
+            local audioQueueTail = 0
+            local audioQueueHead = 1
+            local decodeFinished = false
 
-        local handlers = {
-            shouldStop = function() return state.stopRequested end,
-            onHeader = function(_, _, headerFps)
-                fps = headerFps
-            end,
-            onVideoFrame = function(frame, frameIndex)
-                if state.paused then
-                    -- Time spent paused is not playback falling behind, so
-                    -- it has to come out of the drift figure below.
-                    local pauseBeganMs = os.epoch("utc")
-                    while state.paused and not state.stopRequested do
-                        os.pullEvent("video_control")
-                    end
-                    pausedMs = pausedMs + (os.epoch("utc") - pauseBeganMs)
-                end
-                if state.stopRequested then return end
-
-                -- Draw only if this frame is still roughly on time.
-                --
-                -- Rendering one wall frame is up to 480 monitor calls (120
-                -- rows x 4 column monitors) and at 25fps has 40ms to do it
-                -- in. When it can't, drawing every frame anyway means the
-                -- decode loop -- which also feeds the speakers, since audio
-                -- and video are interleaved in the same stream -- falls
-                -- permanently behind real time. The speaker buffer then
-                -- drains before the next chunk arrives, heard as audio
-                -- cutting out every couple of seconds. Confirmed in-game on
-                -- a 324x120 wall at 25fps.
-                --
-                -- A dropped video frame is far less noticeable than a gap in
-                -- the sound, so lateness is paid for in frames rather than
-                -- audio, and the loop can catch back up instead of sliding
-                -- further behind.
-                --
-                -- Skipping deliberately does NOT touch lastPalette/lastRows:
-                -- those describe what is actually on the wall, the wall still
-                -- holds the last frame drawn, so the caches stay truthful and
-                -- the next frame that does get drawn diffs against reality.
-                local dueSec = cumulativeSec + (frameIndex - 1) / fps
-                -- Every frame is drawn, in order. Dropping late frames to
-                -- chase the audio clock was tried and made things visibly
-                -- worse: the wall renders slower than real time, so it never
-                -- caught up and simply skipped nearly everything. Drawing all
-                -- of them means video runs behind the sound on a slow wall --
-                -- but it LOOKS right, and looking right is what matters here.
-                drawFrame(wall, frame, lastPalette, lastRows)
-                state.elapsedSec = dueSec
-                framesPlayed = frameIndex
-
-                -- Controls redraw at ~2Hz, not every video frame -- the
-                -- computer's own screen isn't the thing being paced to fps.
-                -- _G.MOVCCTWX_STATUS is read by remote.lua and attached to
-                -- every rednet ack it sends, so the pocket computer's
-                -- transport screen can show live title/paused/elapsed/
-                -- volume without a separate round trip.
-                local now = os.epoch("utc")
-                if now - lastControlsDraw > 500 then
-                    local dropPct = framesPlayed > 0
-                        and math.floor(framesDropped / framesPlayed * 100 + 0.5) or 0
-                    -- drift > 0 means the media clock is BEHIND real time,
-                    -- i.e. decoding cannot keep up and the speakers will run
-                    -- dry no matter how the dispatcher behaves. queued is how
-                    -- many decoded audio chunks are waiting to be played: if
-                    -- drift is ~0 and queued stays at 0, the gap is in
-                    -- production; if queued grows, it is in dispatch.
-                    local diag = {
-                        driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
-                        queued = audioQueueTail - audioQueueHead + 1,
-                    }
-                    drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
-                    _G.MOVCCTWX_STATUS = {
-                        screen = "video",
-                        name = entry.name,
-                        paused = state.paused,
-                        elapsedSec = state.elapsedSec,
-                        volumePct = math.floor(state.volume / state.maxVolume * 100 + 0.5),
-                    }
-                    lastControlsDraw = now
-                end
-
-                -- Pace to the frame schedule WITHOUT spending a whole game
-                -- tick on every frame.
-                --
-                -- os.sleep's resolution is one tick (50ms), so ANY sleep --
-                -- even os.sleep(1/25), which asks for 40ms -- costs at least
-                -- 50ms. Sleeping once per frame therefore caps playback at
-                -- 20fps no matter how fast the decode and draw actually are.
-                -- A 25fps video then runs ~20% slower than real time, and
-                -- since the speakers play at real time regardless, audio
-                -- chunks arrive later and later and the buffer keeps running
-                -- dry. That is heard as audio cutting out constantly while
-                -- the video itself looks perfectly smooth -- confirmed
-                -- in-game, and the reason frame-dropping alone did not fix
-                -- it: dropping made drawing cheaper, but the per-frame sleep
-                -- was the thing setting the ceiling.
-                --
-                -- So sleep only when there is a full tick or more to wait.
-                -- Otherwise yield through a queued event, which hands control
-                -- to the audio dispatcher and input coroutines without
-                -- costing a tick.
-                while not state.stopRequested do
-                    local aheadSec = (cumulativeSec + frameIndex / fps) - clockSec()
-                    if aheadSec <= 0 then break end
-                    if aheadSec >= 0.05 then
-                        os.sleep(aheadSec)
-                    else
-                        -- Under one game tick left. os.sleep cannot resolve
-                        -- finer than a tick, so sleeping here would overshoot
-                        -- and cap playback below the encoded frame rate; yield
-                        -- through a queued event instead, which lets the audio
-                        -- and input coroutines run without costing a tick.
-                        os.queueEvent("kx_frame_yield")
-                        os.pullEvent("kx_frame_yield")
-                        break
-                    end
-                end
-            end,
-            onAudioChunk = function(chunk)
-                if state.stopRequested then return end
-                audioQueueTail = audioQueueTail + 1
-                audioQueue[audioQueueTail] = chunk
-                os.queueEvent("kx_audio_wake")
-            end,
-        }
-
-        local playOk, playErr = pcall(function()
-            parallel.waitForAll(
-                -- Only started for the first chunk: entry.audio covers the
-                -- WHOLE video, not one chunk, so it must keep streaming
-                -- straight across chunk boundaries rather than restarting.
-                function()
-                    if chunkIndex == 1 then streamAudio() end
+            local handlers = {
+                shouldStop = function() return state.stopRequested end,
+                onHeader = function(_, _, headerFps)
+                    fps = headerFps
                 end,
-                function()
-                    decodeModule.decode(file, handlers)
-                    cumulativeSec = cumulativeSec + framesPlayed / fps
-                    decodeFinished = true
+                onVideoFrame = function(frame, frameIndex)
+                    if state.paused then
+                        -- Time spent paused is not playback falling behind, so
+                        -- it has to come out of the drift figure below.
+                        local pauseBeganMs = os.epoch("utc")
+                        while state.paused and not state.stopRequested do
+                            os.pullEvent("video_control")
+                        end
+                        pausedMs = pausedMs + (os.epoch("utc") - pauseBeganMs)
+                    end
+                    if state.stopRequested then return end
+
+                    -- Draw only if this frame is still roughly on time.
+                    --
+                    -- Rendering one wall frame is up to 480 monitor calls (120
+                    -- rows x 4 column monitors) and at 25fps has 40ms to do it
+                    -- in. When it can't, drawing every frame anyway means the
+                    -- decode loop -- which also feeds the speakers, since audio
+                    -- and video are interleaved in the same stream -- falls
+                    -- permanently behind real time. The speaker buffer then
+                    -- drains before the next chunk arrives, heard as audio
+                    -- cutting out every couple of seconds. Confirmed in-game on
+                    -- a 324x120 wall at 25fps.
+                    --
+                    -- A dropped video frame is far less noticeable than a gap in
+                    -- the sound, so lateness is paid for in frames rather than
+                    -- audio, and the loop can catch back up instead of sliding
+                    -- further behind.
+                    --
+                    -- Skipping deliberately does NOT touch lastPalette/lastRows:
+                    -- those describe what is actually on the wall, the wall still
+                    -- holds the last frame drawn, so the caches stay truthful and
+                    -- the next frame that does get drawn diffs against reality.
+                    local dueSec = cumulativeSec + (frameIndex - 1) / fps
+                    -- Every frame is drawn, in order. Dropping late frames to
+                    -- chase the audio clock was tried and made things visibly
+                    -- worse: the wall renders slower than real time, so it never
+                    -- caught up and simply skipped nearly everything. Drawing all
+                    -- of them means video runs behind the sound on a slow wall --
+                    -- but it LOOKS right, and looking right is what matters here.
+                    drawFrame(wall, frame, lastPalette, lastRows)
+                    state.elapsedSec = dueSec
+                    framesPlayed = frameIndex
+
+                    -- Controls redraw at ~2Hz, not every video frame -- the
+                    -- computer's own screen isn't the thing being paced to fps.
+                    -- _G.MOVCCTWX_STATUS is read by remote.lua and attached to
+                    -- every rednet ack it sends, so the pocket computer's
+                    -- transport screen can show live title/paused/elapsed/
+                    -- volume without a separate round trip.
+                    local now = os.epoch("utc")
+                    if now - lastControlsDraw > 500 then
+                        local dropPct = framesPlayed > 0
+                            and math.floor(framesDropped / framesPlayed * 100 + 0.5) or 0
+                        -- drift > 0 means the media clock is BEHIND real time,
+                        -- i.e. decoding cannot keep up and the speakers will run
+                        -- dry no matter how the dispatcher behaves. queued is how
+                        -- many decoded audio chunks are waiting to be played: if
+                        -- drift is ~0 and queued stays at 0, the gap is in
+                        -- production; if queued grows, it is in dispatch.
+                        local diag = {
+                            driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
+                            queued = audioQueueTail - audioQueueHead + 1,
+                        }
+                        drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
+                        _G.MOVCCTWX_STATUS = {
+                            screen = "video",
+                            name = entry.name,
+                            paused = state.paused,
+                            elapsedSec = state.elapsedSec,
+                            volumePct = math.floor(state.volume / state.maxVolume * 100 + 0.5),
+                        }
+                        lastControlsDraw = now
+                    end
+
+                    -- Pace to the frame schedule WITHOUT spending a whole game
+                    -- tick on every frame.
+                    --
+                    -- os.sleep's resolution is one tick (50ms), so ANY sleep --
+                    -- even os.sleep(1/25), which asks for 40ms -- costs at least
+                    -- 50ms. Sleeping once per frame therefore caps playback at
+                    -- 20fps no matter how fast the decode and draw actually are.
+                    -- A 25fps video then runs ~20% slower than real time, and
+                    -- since the speakers play at real time regardless, audio
+                    -- chunks arrive later and later and the buffer keeps running
+                    -- dry. That is heard as audio cutting out constantly while
+                    -- the video itself looks perfectly smooth -- confirmed
+                    -- in-game, and the reason frame-dropping alone did not fix
+                    -- it: dropping made drawing cheaper, but the per-frame sleep
+                    -- was the thing setting the ceiling.
+                    --
+                    -- So sleep only when there is a full tick or more to wait.
+                    -- Otherwise yield through a queued event, which hands control
+                    -- to the audio dispatcher and input coroutines without
+                    -- costing a tick.
+                    while not state.stopRequested do
+                        local aheadSec = (cumulativeSec + frameIndex / fps) - clockSec()
+                        if aheadSec <= 0 then break end
+                        if aheadSec >= 0.05 then
+                            os.sleep(aheadSec)
+                        else
+                            -- Under one game tick left. os.sleep cannot resolve
+                            -- finer than a tick, so sleeping here would overshoot
+                            -- and cap playback below the encoded frame rate; yield
+                            -- through a queued event instead, which lets the audio
+                            -- and input coroutines run without costing a tick.
+                            os.queueEvent("kx_frame_yield")
+                            os.pullEvent("kx_frame_yield")
+                            break
+                        end
+                    end
+                end,
+                onAudioChunk = function(chunk)
+                    if state.stopRequested then return end
+                    audioQueueTail = audioQueueTail + 1
+                    audioQueue[audioQueueTail] = chunk
                     os.queueEvent("kx_audio_wake")
                 end,
-                function() -- audio dispatcher: drains the queue, fans each chunk out
-                    -- to every networked speaker in sync (waits for each speaker's own
-                    -- speaker_audio_empty ack, with a 3s per-speaker timeout).
-                    local head = audioQueueHead
-                    while true do
-                        while head > audioQueueTail do
-                            if state.stopRequested or decodeFinished then return end
-                            os.pullEvent("kx_audio_wake")
-                        end
-                        local chunk = audioQueue[head]
-                        audioQueue[head] = nil
-                        head = head + 1
-                        audioQueueHead = head
-                        if chunk and not state.stopRequested and #speakers > 0 then
-                            local funcs = {}
-                            for _, speaker in ipairs(speakers) do
-                                funcs[#funcs + 1] = function()
-                                    while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
-                                        local timerId = os.startTimer(3)
-                                        local gaveUp = false
-                                        repeat
-                                            local ev2, a = os.pullEvent()
-                                            if ev2 == "speaker_audio_empty" and a == peripheral.getName(speaker) then
-                                                break
-                                            elseif ev2 == "timer" and a == timerId then
-                                                gaveUp = true
-                                                break
-                                            end
-                                        until state.stopRequested
-                                        if gaveUp or state.stopRequested then break end
+            }
+
+            local playOk, playErr = pcall(function()
+                parallel.waitForAll(
+                    function()
+                        decodeModule.decode(file, handlers)
+                        cumulativeSec = cumulativeSec + framesPlayed / fps
+                        decodeFinished = true
+                        os.queueEvent("kx_audio_wake")
+                    end,
+                    function() -- audio dispatcher: drains the queue, fans each chunk out
+                        -- to every networked speaker in sync (waits for each speaker's own
+                        -- speaker_audio_empty ack, with a 3s per-speaker timeout).
+                        local head = audioQueueHead
+                        while true do
+                            while head > audioQueueTail do
+                                if state.stopRequested or decodeFinished then return end
+                                os.pullEvent("kx_audio_wake")
+                            end
+                            local chunk = audioQueue[head]
+                            audioQueue[head] = nil
+                            head = head + 1
+                            audioQueueHead = head
+                            if chunk and not state.stopRequested and #speakers > 0 then
+                                local funcs = {}
+                                for _, speaker in ipairs(speakers) do
+                                    funcs[#funcs + 1] = function()
+                                        while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
+                                            local timerId = os.startTimer(3)
+                                            local gaveUp = false
+                                            repeat
+                                                local ev2, a = os.pullEvent()
+                                                if ev2 == "speaker_audio_empty" and a == peripheral.getName(speaker) then
+                                                    break
+                                                elseif ev2 == "timer" and a == timerId then
+                                                    gaveUp = true
+                                                    break
+                                                end
+                                            until state.stopRequested
+                                            if gaveUp or state.stopRequested then break end
+                                        end
                                     end
                                 end
+                                parallel.waitForAll(table.unpack(funcs))
                             end
-                            parallel.waitForAll(table.unpack(funcs))
                         end
-                    end
-                end,
-                function() -- input: keyboard at the computer, or a remote command
-                    -- relayed by remote.lua as a "movcctwx_remote_action" event
-                    -- (already allowlist-checked before it ever gets queued).
-                    while not state.stopRequested and not decodeFinished do
-                        local event, a = os.pullEvent()
-                        local action = nil
+                    end,
+                    function() -- input: keyboard at the computer, or a remote command
+                        -- relayed by remote.lua as a "movcctwx_remote_action" event
+                        -- (already allowlist-checked before it ever gets queued).
+                        while not state.stopRequested and not decodeFinished do
+                            local event, a = os.pullEvent()
+                            local action = nil
 
-                        if event == "key" then
-                            if a == keys.q then
-                                _G.MOVCCTWX_TERMINATED = true
-                                error("Terminated", 0)
-                            elseif a == keys.space then action = "playpause"
-                            elseif a == keys.s then action = "stop"
-                            elseif a == keys.left then action = "vol-1"
-                            elseif a == keys.right then action = "vol+1"
+                            if event == "key" then
+                                if a == keys.q then
+                                    _G.MOVCCTWX_TERMINATED = true
+                                    error("Terminated", 0)
+                                elseif a == keys.space then action = "playpause"
+                                elseif a == keys.s then action = "stop"
+                                elseif a == keys.left then action = "vol-1"
+                                elseif a == keys.right then action = "vol+1"
+                                end
+                            elseif event == "movcctwx_remote_action" then
+                                action = a
+                                -- startup.lua's remoteMenuWatcher treats these 4
+                                -- as "go somewhere else" -- from in here that's
+                                -- indistinguishable from a plain stop: halt this
+                                -- video and hand control back to runVideoMenu's
+                                -- outer loop, which then honors the real target.
+                                if action == "open_video_menu" or action == "open_music_menu"
+                                    or action == "play_video" or action == "play_music" then
+                                    action = "stop"
+                                end
                             end
-                        elseif event == "movcctwx_remote_action" then
-                            action = a
-                            -- startup.lua's remoteMenuWatcher treats these 4
-                            -- as "go somewhere else" -- from in here that's
-                            -- indistinguishable from a plain stop: halt this
-                            -- video and hand control back to runVideoMenu's
-                            -- outer loop, which then honors the real target.
-                            if action == "open_video_menu" or action == "open_music_menu"
-                                or action == "play_video" or action == "play_music" then
-                                action = "stop"
-                            end
-                        end
 
-                        if action == "playpause" then
-                            state.paused = not state.paused
-                            os.queueEvent("video_control")
-                        elseif action == "stop" then
-                            state.stopRequested = true
-                            os.queueEvent("video_control")
-                        elseif action == "vol-1" then adjustVolume(-0.01)
-                        elseif action == "vol+1" then adjustVolume(0.01)
-                        elseif action == "vol-10" then adjustVolume(-0.10)
-                        elseif action == "vol+10" then adjustVolume(0.10)
+                            if action == "playpause" then
+                                state.paused = not state.paused
+                                os.queueEvent("video_control")
+                            elseif action == "stop" then
+                                state.stopRequested = true
+                                os.queueEvent("video_control")
+                            elseif action == "vol-1" then adjustVolume(-0.01)
+                            elseif action == "vol+1" then adjustVolume(0.01)
+                            elseif action == "vol-10" then adjustVolume(-0.10)
+                            elseif action == "vol+10" then adjustVolume(0.10)
+                            end
                         end
+                    end,
+                    function() -- prefetch the NEXT chunk while this one plays
+                        local nextUrl = entry.chunks[chunkIndex + 1]
+                        if not nextUrl then return end
+                        -- pcall'd on purpose: a failed prefetch must not take
+                        -- down playback of the chunk currently on screen. The
+                        -- loop just fetches it normally next time round
+                        -- instead (with the loading message), same as before.
+                        local ok, result = pcall(fetchChunkToMemory, nextUrl)
+                        if ok then nextFile = result end
                     end
-                end,
-                function() -- prefetch the NEXT chunk while this one plays
-                    local nextUrl = entry.chunks[chunkIndex + 1]
-                    if not nextUrl then return end
-                    -- pcall'd on purpose: a failed prefetch must not take
-                    -- down playback of the chunk currently on screen. The
-                    -- loop just fetches it normally next time round
-                    -- instead (with the loading message), same as before.
-                    local ok, result = pcall(fetchChunkToMemory, nextUrl)
-                    if ok then nextFile = result end
+                )
+            end)
+
+            for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
+            resetPalette(wall)
+
+            if not playOk then
+                if tostring(playErr):find("Terminated") then
+                    wall.setBackgroundColor(colors.black)
+                    wall.clear()
+                    error(playErr, 0)
                 end
-            )
-        end)
-
-        for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
-        resetPalette(wall)
-
-        if not playOk then
-            if tostring(playErr):find("Terminated") then
-                wall.setBackgroundColor(colors.black)
-                wall.clear()
-                error(playErr, 0)
+                drawStatus(screen, "Playback error: " .. tostring(playErr))
+                os.sleep(2)
+                result = "done"
+                break
             end
-            drawStatus(screen, "Playback error: " .. tostring(playErr))
-            os.sleep(2)
-            result = "done"
-            break
-        end
 
-        if state.stopRequested then
-            result = "stopped"
-            break
-        end
+            if state.stopRequested then
+                result = "stopped"
+                break
+            end
 
-        -- Hand the already-downloaded next chunk to the next iteration.
-        file = nextFile
-        nextFile = nil
+            -- Hand the already-downloaded next chunk to the next iteration.
+            file = nextFile
+            nextFile = nil
+        end
+        videoDone = true
     end
+
+    parallel.waitForAll(videoLoop, streamAudio)
 
     wall.setBackgroundColor(colors.black)
     wall.clear()
