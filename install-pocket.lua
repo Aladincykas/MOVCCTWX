@@ -40,5 +40,11 @@ for _, absPath in ipairs(FILES) do
     download(BASE_URL .. absPath:sub(2), absPath)
 end
 
-print("\nDone. Run 'startup.lua' now, or reboot to auto-start it.")
+-- Same reasoning as install-brain.lua's matching comment: CC caches
+-- loaded code in memory until reboot, so this reboots automatically
+-- instead of relying on a separate manual step every time.
+print("\nDone. Rebooting to load the new files (reboots always required --")
+print("CC caches loaded code in memory until then)...")
 print("Make sure a wireless modem is attached/crafted in first.")
+sleep(1.5)
+os.reboot()

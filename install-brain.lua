@@ -57,5 +57,16 @@ for _, absPath in ipairs(FILES) do
     download(BASE_URL .. absPath:sub(2), absPath)
 end
 
-print("\nDone. Edit config.lua's WALL_MONITOR_NAMES to match your 12 monitors")
-print("(peripheral.getNames() lists them), then run 'startup.lua' or reboot.")
+-- CC:Tweaked caches require()'d modules in memory for the whole computer
+-- session, not per-program-run -- overwriting the files on disk above
+-- does NOT make a currently-loaded module re-read itself. Without a
+-- reboot, running startup.lua again just keeps using whatever was already
+-- in memory from before this install, which reads as "the update didn't
+-- take" even though the new files ARE correctly on disk (confirmed
+-- in-game as exactly this, more than once). Rebooting automatically here
+-- removes that whole class of confusion instead of relying on remembering
+-- a separate manual step every time.
+print("\nDone. Rebooting to load the new files (reboots always required --")
+print("CC caches loaded code in memory until then)...")
+sleep(1.5)
+os.reboot()
