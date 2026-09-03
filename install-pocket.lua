@@ -24,6 +24,13 @@ local FILES = {
 local BASE_URL = ("https://raw.githubusercontent.com/%s/%s/%s/pocket/"):format(GITHUB_USER, REPO, BRANCH)
 
 local function download(url, destPath)
+    -- Deletes the old file first, THEN writes the new one, instead of
+    -- just opening it in "w" mode (which already truncates -- this isn't
+    -- fixing a real overwrite bug, fs.open("w") always replaces the full
+    -- content). This exists to rule out any possibility of stale content
+    -- surviving an install, full stop -- delete-then-recreate can't
+    -- leave anything old behind, whatever the cause of a report was.
+    if fs.exists(destPath) then fs.delete(destPath) end
     local response, err = http.get(url .. "?t=" .. tostring(os.epoch("utc")))
     if not response then
         error(("Failed to download %s: %s"):format(url, tostring(err)))
