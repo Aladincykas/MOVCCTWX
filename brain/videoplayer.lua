@@ -68,7 +68,7 @@ end
 -- elapsed/remaining, volume, and the key controls. No touch targets --
 -- input here is keyboard (at the computer) or a remote command relayed
 -- from the pocket computer via remote.lua.
-local function drawControls(screen, state, entry, totalDurationSec)
+local function drawControls(screen, state, entry, totalDurationSec, dropPct)
     local elapsed = state.elapsedSec
     local remaining = math.max(0, totalDurationSec - elapsed)
     local pct = math.floor(state.volume / state.maxVolume * 100 + 0.5)
@@ -81,7 +81,18 @@ local function drawControls(screen, state, entry, totalDurationSec)
     screen.setCursorPos(1, 2)
     screen.write(("%s %s / -%s   Vol %d%%"):format(
         state.paused and "PAUSED" or "PLAYING", formatTime(elapsed), formatTime(remaining), pct))
-    screen.setCursorPos(1, 4)
+    -- How much video is being dropped to keep audio intact (see
+    -- onVideoFrame). 0% means the wall is comfortably keeping up; a high,
+    -- steady number means the encode is asking for more frames per second
+    -- than this wall can physically draw, and re-encoding at a lower fps
+    -- would give smoother motion than dropping does.
+    if dropPct and dropPct > 0 then
+        screen.setCursorPos(1, 3)
+        screen.setTextColor(dropPct >= 25 and colors.orange or colors.lightGray)
+        screen.write(("Praleista kadru: %d%%"):format(dropPct))
+        screen.setTextColor(colors.white)
+    end
+    screen.setCursorPos(1, 5)
     screen.write("[space] play/pause  [s] stop  [left/right] volume  [q] quit")
 end
 
@@ -172,6 +183,7 @@ function M.play(wall, screen, speakers, entry, config)
         local frameStart = os.epoch("utc")
         local lastPalette, lastRows = {}, {}
         local framesPlayed = 0
+        local framesDropped = 0
         local lastControlsDraw = 0
 
         local audioQueue = {}
@@ -191,7 +203,33 @@ function M.play(wall, screen, speakers, entry, config)
                 end
                 if state.stopRequested then return end
 
-                drawFrame(wall, frame, lastPalette, lastRows)
+                -- Draw only if this frame is still roughly on time.
+                --
+                -- Rendering one wall frame is up to 480 monitor calls (120
+                -- rows x 4 column monitors) and at 25fps has 40ms to do it
+                -- in. When it can't, drawing every frame anyway means the
+                -- decode loop -- which also feeds the speakers, since audio
+                -- and video are interleaved in the same stream -- falls
+                -- permanently behind real time. The speaker buffer then
+                -- drains before the next chunk arrives, heard as audio
+                -- cutting out every couple of seconds. Confirmed in-game on
+                -- a 324x120 wall at 25fps.
+                --
+                -- A dropped video frame is far less noticeable than a gap in
+                -- the sound, so lateness is paid for in frames rather than
+                -- audio, and the loop can catch back up instead of sliding
+                -- further behind.
+                --
+                -- Skipping deliberately does NOT touch lastPalette/lastRows:
+                -- those describe what is actually on the wall, the wall still
+                -- holds the last frame drawn, so the caches stay truthful and
+                -- the next frame that does get drawn diffs against reality.
+                local dueMs = frameStart + (frameIndex - 1) / fps * 1000
+                if os.epoch("utc") - dueMs <= 1000 / fps then
+                    drawFrame(wall, frame, lastPalette, lastRows)
+                else
+                    framesDropped = framesDropped + 1
+                end
                 state.elapsedSec = cumulativeSec + (frameIndex - 1) / fps
                 framesPlayed = frameIndex
 
@@ -203,7 +241,9 @@ function M.play(wall, screen, speakers, entry, config)
                 -- volume without a separate round trip.
                 local now = os.epoch("utc")
                 if now - lastControlsDraw > 500 then
-                    drawControls(screen, state, entry, entry.durationSec or 0)
+                    local dropPct = framesPlayed > 0
+                        and math.floor(framesDropped / framesPlayed * 100 + 0.5) or 0
+                    drawControls(screen, state, entry, entry.durationSec or 0, dropPct)
                     _G.MOVCCTWX_STATUS = {
                         screen = "video",
                         name = entry.name,
