@@ -131,18 +131,10 @@ local function runMainMenu()
         :setForeground(colors.lime)
         :onClick(function() chosen = "music" basalt.stop() end)
 
-    -- Remote commands work from the main menu too: open a submenu, or jump
-    -- straight into a named video/song without touching the computer.
-    safeSchedule(function()
-        while not chosen and not _G.MOVCCTWX_TERMINATED do
-            local _, action, name = os.pullEventRaw("movcctwx_remote_action")
-            if action == "open_video_menu" then chosen = "video" basalt.stop()
-            elseif action == "open_music_menu" then chosen = "music" basalt.stop()
-            elseif action == "play_video" then chosen = { screen = "video", name = name } basalt.stop()
-            elseif action == "play_music" then chosen = { screen = "music", name = name } basalt.stop()
-            end
-        end
-    end)
+    -- Remote menu-level commands (open a submenu, or jump straight into a
+    -- named video/song) are handled by the single global watcher below
+    -- (remoteMenuWatcher), not here -- see its comment for why a per-screen
+    -- listener like this used to be, and why that was a real bug.
 
     frame:draw()
     basalt.run()
@@ -160,16 +152,9 @@ local function runVideoMenu()
     local contentTop = 3
     local footerRow = h
 
-    while not exitReason and not _G.MOVCCTWX_TERMINATED do
+    while not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
         local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
         local selectedVideo = nil
-
-        local function playByName(name)
-            for _, v in ipairs(videos) do
-                if v.name == name then return v end
-            end
-            return nil
-        end
 
         local perPage = math.max(1, math.floor((footerRow - contentTop) / ROW_STEP))
         local totalPages = math.max(1, math.ceil(#videos / perPage))
@@ -212,27 +197,17 @@ local function runVideoMenu()
         end
 
         draw()
-
-        safeSchedule(function()
-            while not selectedVideo and not exitReason and not _G.MOVCCTWX_TERMINATED do
-                local _, action, name = os.pullEventRaw("movcctwx_remote_action")
-                if action == "open_music_menu" then exitReason = "music" basalt.stop()
-                elseif action == "play_video" then
-                    local v = playByName(name)
-                    if v then selectedVideo = v basalt.stop() end
-                end
-            end
-        end)
-
         frame:draw()
         basalt.run()
 
         if _G.MOVCCTWX_TERMINATED then return "quit" end
+        if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
 
         if selectedVideo then
             local wall = getWall()
             videoplayer.play(wall, term, speakers, selectedVideo, config)
             if _G.MOVCCTWX_TERMINATED then return "quit" end
+            if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
         end
     end
 
@@ -242,26 +217,38 @@ end
 
 -- ==== Dispatch ====
 -- Runs as one branch of the top-level parallel.waitForAny below, alongside
--- remoteLoop -- see that function for why it's structured that way. This
--- is the only branch that's ever expected to actually return.
+-- remoteLoop and remoteMenuWatcher -- see remoteMenuWatcher's comment for
+-- how a remote menu-level command (open a submenu, or jump straight into a
+-- named video/song) reaches this loop no matter which screen is currently
+-- showing or blocking. This is the only branch that's ever expected to
+-- actually return.
 local function mainLoop()
-    local screen = "video"
+    local screen = "menu"
     local pendingSongName = nil
     while true do
+        -- A remote menu-level command always wins over whatever the
+        -- just-finished screen returned -- see remoteMenuWatcher below.
+        if _G.MOVCCTWX_REMOTE_PENDING and not _G.MOVCCTWX_TERMINATED then
+            screen = _G.MOVCCTWX_REMOTE_TARGET
+            _G.MOVCCTWX_REMOTE_PENDING = false
+        end
+
         if type(screen) == "table" then
-            -- Remote "play X directly" from the main menu, before any
-            -- submenu was ever opened.
             if screen.screen == "video" then
-                local videoplayer = require("videoplayer")
-                local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
-                local match = nil
-                for _, v in ipairs(videos) do if v.name == screen.name then match = v end end
-                if match then videoplayer.play(getWall(), term, speakers, match, config) end
-                screen = "video"
+                if screen.name then
+                    local videoplayer = require("videoplayer")
+                    local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+                    local match = nil
+                    for _, v in ipairs(videos) do if v.name == screen.name then match = v end end
+                    if match then videoplayer.play(getWall(), term, speakers, match, config) end
+                end
+                screen = "menu"
             else
                 pendingSongName = screen.name
                 screen = "music"
             end
+        elseif screen == "menu" then
+            screen = runMainMenu()
         elseif screen == "video" then
             screen = runVideoMenu()
         elseif screen == "music" then
@@ -269,11 +256,11 @@ local function mainLoop()
             local musicplayer = require("musicplayer")
             local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName)
             pendingSongName = nil
-            screen = (exitReason == "quit") and "quit" or "video"
+            screen = (exitReason == "quit") and "quit" or "menu"
         elseif screen == "quit" or _G.MOVCCTWX_TERMINATED then
             break
         else
-            screen = "video"
+            screen = "menu"
         end
     end
 end
@@ -295,7 +282,58 @@ local function remoteLoop()
     while true do os.pullEventRaw() end
 end
 
-parallel.waitForAny(mainLoop, remoteLoop)
+-- The 4 menu-level remote commands (open_video_menu, open_music_menu,
+-- play_video, play_music) need to interrupt WHATEVER screen is currently
+-- showing/blocking -- the main menu, the video list, an actively playing
+-- video, or the music library/playlist/Now Playing screen -- and land on
+-- the right one, not just be silently ignored if the "wrong" screen
+-- happens to be active. A previous version had each screen listen for
+-- these itself; that was a real bug (confirmed in-game: remote.lua still
+-- replied "ok" since the command WAS delivered and allowlisted, but
+-- runVideoMenu didn't recognize "play_music" at all, so nothing happened
+-- and the pocket computer had no way to tell).
+--
+-- This single watcher is the only place that decides WHERE a remote
+-- command should take the program (_G.MOVCCTWX_REMOTE_TARGET, read by
+-- mainLoop above); it interrupts whichever screen is currently active via
+-- two independent paths, since there are two fundamentally different
+-- kinds of "currently active" here:
+--   1. A Basalt screen (main menu, video list, music library/playlist) --
+--      basalt.stop() unblocks its basalt.run() call directly.
+--   2. A raw event-loop screen (videoplayer.play(), musicplayer's
+--      playSong()) -- these don't call basalt.run() at all, but both
+--      already listen for "movcctwx_remote_action" themselves (for
+--      playpause/stop/volume) and treat these 4 action names as an
+--      alias for "stop", so they unblock on their own via the exact same
+--      event this watcher also reacts to.
+-- Either way, once the active call returns, mainLoop's REMOTE_PENDING
+-- check (at the top of its loop) takes over from there.
+local function remoteMenuWatcher()
+    while true do
+        local _, action, name = os.pullEvent("movcctwx_remote_action")
+        if action == "open_video_menu" then
+            _G.MOVCCTWX_REMOTE_TARGET = "video"
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        elseif action == "open_music_menu" then
+            _G.MOVCCTWX_REMOTE_TARGET = "music"
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        elseif action == "play_video" then
+            _G.MOVCCTWX_REMOTE_TARGET = { screen = "video", name = name }
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        elseif action == "play_music" then
+            _G.MOVCCTWX_REMOTE_TARGET = { screen = "music", name = name }
+            _G.MOVCCTWX_REMOTE_PENDING = true
+        end
+        if _G.MOVCCTWX_REMOTE_PENDING then
+            pcall(basalt.stop)
+        end
+    end
+end
+
+_G.MOVCCTWX_REMOTE_PENDING = false
+_G.MOVCCTWX_REMOTE_TARGET = nil
+
+parallel.waitForAny(mainLoop, remoteLoop, remoteMenuWatcher)
 
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)

@@ -556,6 +556,16 @@ function M.run(mon, speakers, config, frame, startSongName)
         safeSchedule(function()
             while not state.stopRequested do
                 local _, action = os.pullEvent("movcctwx_remote_action")
+                -- startup.lua's remoteMenuWatcher treats these 4 as "go
+                -- somewhere else" -- from in here that's indistinguishable
+                -- from a plain stop: halt this song, hand control back to
+                -- M.run()'s outer loop (guarded below by
+                -- MOVCCTWX_REMOTE_PENDING), which returns up to mainLoop,
+                -- which then honors the real target.
+                if action == "open_video_menu" or action == "open_music_menu"
+                    or action == "play_video" or action == "play_music" then
+                    action = "stop"
+                end
                 if action == "playpause" then
                     state.paused = not state.paused
                     if playPauseBtn then playPauseBtn:setText(state.paused and "Play" or "Pause") end
@@ -1075,7 +1085,14 @@ function M.run(mon, speakers, config, frame, startSongName)
     end
 
     local screen = "library" -- "library" | "playlist" | "addSongs"
-    while not exitReason and not _G.MOVCCTWX_TERMINATED do
+    -- MOVCCTWX_REMOTE_PENDING (set by startup.lua's remoteMenuWatcher) ends
+    -- this loop the same way exitReason/TERMINATED do -- a remote
+    -- menu-level command (e.g. "play_video" while sitting on the library
+    -- screen) calls basalt.stop() to unblock whichever basalt.run() below
+    -- is currently active, and this guard is what actually lets M.run()
+    -- notice that and return instead of just redrawing the same screen
+    -- again next iteration.
+    while not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
         local idleStop = function()
             exitReason = exitReason or "idle"
             for _, spk in ipairs(speakers) do pcall(spk.stop) end

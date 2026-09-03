@@ -264,6 +264,15 @@ function M.play(wall, screen, speakers, entry, config)
                             end
                         elseif event == "movcctwx_remote_action" then
                             action = a
+                            -- startup.lua's remoteMenuWatcher treats these 4
+                            -- as "go somewhere else" -- from in here that's
+                            -- indistinguishable from a plain stop: halt this
+                            -- video and hand control back to runVideoMenu's
+                            -- outer loop, which then honors the real target.
+                            if action == "open_video_menu" or action == "open_music_menu"
+                                or action == "play_video" or action == "play_music" then
+                                action = "stop"
+                            end
                         end
 
                         if action == "playpause" then
