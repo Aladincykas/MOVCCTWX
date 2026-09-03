@@ -678,6 +678,16 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             local decoder = dfpwm.make_decoder()
             local chunkSize = 16 * 1024
 
+            -- How long to wait for a speaker to report room before treating it
+            -- as gone. Generous on purpose: a merely BUSY speaker was being
+            -- given up on at 3s and skipped, which is what broke multi-speaker
+            -- sync. A genuinely dead one still gets dropped, just not a slow
+            -- one on a laggy tick.
+            local SPEAKER_ACK_TIMEOUT_SEC = 10
+
+            -- Speakers that stopped acknowledging. Indexes into `speakers`.
+            local deadSpeakers = {}
+
             -- Decode-ahead (double buffering). The old loop was strictly
             -- sequential: push a buffer, WAIT for speaker_audio_empty,
             -- then read+decode the next chunk, then push. But
@@ -698,8 +708,21 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             end
 
             local buffer = readNext()
+            -- Held across a pause so the block that was interrupted can be
+            -- replayed rather than lost, and so the already-decoded next block
+            -- is not thrown away and read twice.
+            local pendingNext = nil
+            local pausedMidBlock = false
 
             while not state.stopRequested and buffer do
+                if state.paused then
+                    -- Silence NOW. Pausing has to discard what the speakers
+                    -- are holding, not merely stop supplying them: playAudio
+                    -- queues a whole block ahead, which at this size is 2.7
+                    -- seconds of music that would otherwise keep playing after
+                    -- you pressed pause.
+                    for _, spk in ipairs(speakers) do pcall(spk.stop) end
+                end
                 while state.paused and not state.stopRequested do
                     os.pullEvent("music_control")
                 end
@@ -719,24 +742,54 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 -- wait could resume on a DIFFERENT speaker's empty event
                 -- and retry too early), with a 3s timeout so one dead
                 -- speaker among many can't stall the whole song.
-                local nextBuffer = nil
+                pausedMidBlock = false
+                -- Already decoded before the pause -- reusing it avoids
+                -- reading the same bytes twice, which would skip a block.
+                local nextBuffer = pendingNext
                 if #speakers > 0 then
                     local funcs = {}
-                    for _, speaker in ipairs(speakers) do
+                    for speakerIndex, speaker in ipairs(speakers) do
                         funcs[#funcs + 1] = function()
-                            while not state.stopRequested and not speaker.playAudio(buffer, state.volume) do
-                                local timerId = os.startTimer(3)
+                            if deadSpeakers[speakerIndex] then return end
+                            if state.paused then pausedMidBlock = true return end
+                            while not state.stopRequested and not state.paused do
+                                if speaker.playAudio(buffer, state.volume) then return end
+                                -- Waits for THIS speaker's own ack (an
+                                -- unfiltered wait could resume on a different
+                                -- speaker's empty event and retry too early),
+                                -- but also wakes on music_control -- otherwise
+                                -- a pause goes unnoticed until the speaker has
+                                -- played out its whole buffer, which is 2.7
+                                -- seconds of audio at this block size. That is
+                                -- the pause "not reacting" you feel.
+                                local timerId = os.startTimer(SPEAKER_ACK_TIMEOUT_SEC)
                                 local gaveUp = false
                                 repeat
                                     local ev, a = os.pullEvent()
                                     if ev == "speaker_audio_empty" and a == peripheral.getName(speaker) then
+                                        break
+                                    elseif ev == "music_control" then
                                         break
                                     elseif ev == "timer" and a == timerId then
                                         gaveUp = true
                                         break
                                     end
                                 until state.stopRequested
-                                if gaveUp or state.stopRequested then break end
+                                if gaveUp then
+                                    -- Drop this speaker for the rest of the
+                                    -- song rather than skipping one buffer on
+                                    -- it. Skipping was the old behaviour and it
+                                    -- is what desynced them: that speaker loses
+                                    -- a block the others played, so it runs
+                                    -- permanently offset, and every further
+                                    -- timeout widens the gap. Losing one
+                                    -- speaker cleanly is far better than every
+                                    -- speaker slowly drifting apart.
+                                    deadSpeakers[speakerIndex] = true
+                                    return
+                                end
+                                if state.stopRequested then return end
+                                if state.paused then pausedMidBlock = true return end
                             end
                         end
                     end
@@ -744,12 +797,24 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                     -- resumed first (so playAudio fires immediately), then
                     -- this one runs its decode while they're parked waiting
                     -- for their acks.
-                    funcs[#funcs + 1] = function() nextBuffer = readNext() end
+                    if not nextBuffer then
+                        funcs[#funcs + 1] = function() nextBuffer = readNext() end
+                    end
                     parallel.waitForAll(table.unpack(funcs))
                 else
-                    nextBuffer = readNext()
+                    nextBuffer = nextBuffer or readNext()
                 end
-                buffer = nextBuffer
+
+                if pausedMidBlock then
+                    -- This block was cut off part-way through. Keep it and
+                    -- play it again on resume: repeating a fraction of a
+                    -- second is far less noticeable than dropping nearly
+                    -- three seconds of the song out of the middle.
+                    pendingNext = nextBuffer
+                else
+                    pendingNext = nil
+                    buffer = nextBuffer
+                end
             end
 
             response.close()
