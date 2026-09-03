@@ -103,8 +103,17 @@ function M.open(config)
     -- Palette slots are shared color definitions, not per-pixel state --
     -- every monitor in the grid must agree on what color N means, or tile
     -- boundaries show visibly different colors for the same palette index.
-    function wall.setPaletteColor(colorNum, r, g, b)
-        forEach(function(mon) mon.setPaletteColor(colorNum, r, g, b) end)
+    --
+    -- Forwards the arguments it was ACTUALLY given rather than four named
+    -- ones. CC accepts two call shapes -- setPaletteColor(index, 0xRRGGBB)
+    -- and setPaletteColor(index, r, g, b) -- and naming the parameters
+    -- turned the first into a four-argument call with nil g/b, which CC
+    -- rejects with "bad argument #3 (number expected, got nil)". That fired
+    -- at the end of every video chunk, where resetPalette() uses the packed
+    -- form.
+    function wall.setPaletteColor(...)
+        local args = table.pack(...)
+        forEach(function(mon) mon.setPaletteColor(table.unpack(args, 1, args.n)) end)
     end
 
     function wall.clear()
