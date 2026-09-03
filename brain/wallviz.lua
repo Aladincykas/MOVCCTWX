@@ -95,31 +95,91 @@ local function newWaveStyle()
     }
 end
 
--- ==== Style 3: pulse -- concentric rings expanding outward from the
--- wall's center, old-school "ambience"/radar-sweep style. ====
-local function newPulseStyle()
-    local radius
+-- ==== Style 3: plasma -- classic "flowing color blob" effect: four sine
+-- waves at different frequencies/axes/speeds, summed and normalized to
+-- pick a color band per cell. The frequencies are deliberately
+-- incommensurate (10, 10, 10, 20 combined with DIFFERENT time multipliers
+-- -- 1x, 1.3x, 0.7x, 1.6x) so the combined pattern doesn't repeat on any
+-- short, obviously-noticeable cycle the way a single expanding ring did --
+-- it keeps drifting/warping instead of looping. This is the standard
+-- cheap-plasma technique (any old demoscene/screensaver plasma effect
+-- uses this same trick), not anything CC-specific. ====
+local function newPlasmaStyle()
+    local t
     return {
-        init = function() radius = 0 end,
+        init = function() t = math.random() * 20 end,
         step = function(cols, rows, paused)
-            if not paused then radius = radius + 0.4 end
+            if not paused then t = t + 0.12 end
         end,
         draw = function(wall, cols, rows)
-            local cx, cy = cols / 2, rows / 2
-            local maxR = math.sqrt(cx * cx + cy * cy)
-            local r0 = radius % maxR
             blitFrame(wall, cols, rows, function(r, c)
-                -- Monitors read roughly 2 chars wide per 1 tall -- squash
-                -- the y delta so rings look circular instead of oval.
-                local dx, dy = c - cx, (r - cy) * 2
-                local dist = math.sqrt(dx * dx + dy * dy)
-                if math.abs(dist - r0) < 2.5 then return bandColor(dist / maxR) end
+                local x, y = c / cols, r / rows
+                local v = math.sin(x * 10 + t)
+                    + math.sin(y * 10 - t * 1.3)
+                    + math.sin((x + y) * 10 + t * 0.7)
+                    + math.sin(math.sqrt((x - 0.5) ^ 2 + (y - 0.5) ^ 2) * 20 - t * 1.6)
+                return bandColor(math.max(0, math.min(1, (v + 4) / 8)))
             end)
         end,
     }
 end
 
-local STYLES = { newBarsStyle, newWaveStyle, newPulseStyle }
+-- ==== Style 4: starfield -- particles streaking outward from the wall's
+-- center at random angles/speeds, each looping back to a fresh random
+-- angle once it exits -- genuinely randomized motion (not a fixed
+-- geometric shape animating), so it never traces the same path twice.
+-- Star positions are written into a sparse lookup table BEFORE blitting
+-- (not by checking every star against every cell -- that's O(cells *
+-- stars) per frame, too slow for a big wall), so this stays the same
+-- O(cells) cost per frame as every other style. ====
+local function newStarfieldStyle()
+    local NUM_STARS = 50
+    local stars, cx, cy
+    local function respawn(s)
+        s.angle = math.random() * 2 * math.pi
+        s.dist = 0
+        s.speed = 0.4 + math.random() * 1.2
+        s.band = math.random()
+    end
+    return {
+        init = function(cols, rows)
+            cx, cy = cols / 2, rows / 2
+            stars = {}
+            for i = 1, NUM_STARS do
+                stars[i] = {}
+                respawn(stars[i])
+                stars[i].dist = math.random() * math.max(cx, cy) -- pre-scattered, not all starting at center
+            end
+        end,
+        step = function(cols, rows, paused)
+            if paused then return end
+            local maxDist = math.sqrt(cx * cx + cy * cy)
+            for _, s in ipairs(stars) do
+                s.dist = s.dist + s.speed
+                if s.dist > maxDist then respawn(s) end
+            end
+        end,
+        draw = function(wall, cols, rows)
+            local grid = {}
+            for _, s in ipairs(stars) do
+                -- Monitors read roughly 2 chars wide per 1 tall -- squash
+                -- the vertical component so streaks radiate evenly instead
+                -- of stretching top/bottom.
+                local sx = math.floor(cx + math.cos(s.angle) * s.dist + 0.5)
+                local sy = math.floor(cy + math.sin(s.angle) * s.dist * 0.5 + 0.5)
+                if sx >= 1 and sx <= cols and sy >= 1 and sy <= rows then
+                    grid[sy] = grid[sy] or {}
+                    grid[sy][sx] = bandColor(s.band)
+                end
+            end
+            blitFrame(wall, cols, rows, function(r, c)
+                return grid[r] and grid[r][c]
+            end)
+        end,
+    }
+end
+
+local STYLES = { newBarsStyle, newWaveStyle, newPlasmaStyle, newStarfieldStyle }
 
 -- Plain string hash (sum of byte values) -- doesn't need to be
 -- cryptographic, just stable across runs and reasonably spread out across

@@ -209,7 +209,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     -- using wall.lua's row-blit (the same mechanism videoplayer.lua uses
     -- for video frames) so it correctly spans all 12 monitors as one
     -- surface, not just one tile. See wallviz.lua for the actual visual
-    -- styles (bars/wave/pulse) and why the style is picked per-song, not
+    -- styles (bars/wave/plasma/starfield) and why the style is picked per-song, not
     -- randomly on every play.
     local wallviz = require("wallviz")
 
