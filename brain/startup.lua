@@ -223,10 +223,10 @@ local function runMainMenu()
     -- Whole block (title + 3 buttons) centered vertically as one unit,
     -- not pinned near the top -- previously left a big dead gap below the
     -- buttons on a tall screen.
-    local BLOCK_HEIGHT = 8 -- title(1) gap(2) 3 buttons w/ 1-row gaps between (5)
+    local BLOCK_HEIGHT = 10 -- title(1) gap(2) 4 buttons w/ 1-row gaps between (7)
     local blockTop = math.max(2, math.floor((h - BLOCK_HEIGHT) / 2) + 1)
     local titleY = blockTop
-    local btn1Y, btn2Y, btn3Y = titleY + 3, titleY + 5, titleY + 7
+    local btn1Y, btn2Y, btn3Y, btn4Y = titleY + 3, titleY + 5, titleY + 7, titleY + 9
 
     frame:addLabel()
         :setText(title)
@@ -242,9 +242,23 @@ local function runMainMenu()
         :setForeground(colors.lime)
         :onClick(function() chosen = "video" basalt.stop() end)
 
+    -- Films get their own way in, rather than being mixed into the video
+    -- list. They are a different thing to browse: a handful of long titles
+    -- you sit down to, against a few dozen clips you flick through -- and
+    -- only these ever have subtitles or run long enough for the split to
+    -- matter. Which repos hold them is config.lua's `films` flag, so this
+    -- needs no separate manifest and no naming convention.
+    frame:addButton()
+        :setText("MOVIES / SERIES")
+        :setPosition(bx, btn2Y)
+        :setSize(buttonW, 1)
+        :setBackground(colors.gray)
+        :setForeground(colors.lime)
+        :onClick(function() chosen = "movies" basalt.stop() end)
+
     frame:addButton()
         :setText("MUSIC PLAYER")
-        :setPosition(bx, btn2Y)
+        :setPosition(bx, btn3Y)
         :setSize(buttonW, 1)
         :setBackground(colors.gray)
         :setForeground(colors.lime)
@@ -261,7 +275,7 @@ local function runMainMenu()
     -- just always true here.
     frame:addButton()
         :setText("NOW PLAYING")
-        :setPosition(bx, btn3Y)
+        :setPosition(bx, btn4Y)
         :setSize(buttonW, 1)
         :setBackground(colors.gray)
         :setForeground(colors.lime)
@@ -397,7 +411,10 @@ local function playVideoPlaylist(videoplayer, videos)
     end
 end
 
-local function runVideoMenu()
+-- filmsOnly: browse the film repos instead of the clip ones. The two never
+-- mix, so each list stays short enough to page through and the queue button
+-- only appears where queueing is actually possible.
+local function runVideoMenu(filmsOnly)
     local videoplayer = require("videoplayer")
     local exitReason = nil
     local screen = "library"
@@ -406,7 +423,16 @@ local function runVideoMenu()
     local footerRow = h
     local playlist = _G.MOVCCTWX_VIDEO_PLAYLIST
 
-    local videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+    local function libraryList()
+        local all, errs = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+        local out = {}
+        for _, v in ipairs(all) do
+            if (v.__films == true) == (filmsOnly == true) then out[#out + 1] = v end
+        end
+        return out, errs
+    end
+
+    local videos, loadErrors = libraryList()
 
     local page, playlistPage, addPage = 1, 1, 1
     local selectedVideo, nextScreen, playlistAction = nil, nil, nil
@@ -477,7 +503,8 @@ local function runVideoMenu()
         else
             note = ("%d video(s) -- page %d/%d"):format(#videos, page, totalPages)
         end
-        header(" DIDZIULIS EKRANAS -- SELECT A VIDEO ", note, noteColor)
+        header(filmsOnly and " FILMAI IR SERIALAI -- SELECT " or " DIDZIULIS EKRANAS -- SELECT A VIDEO ",
+            note, noteColor)
 
         local addW = 3
         local startIdx = (page - 1) * perPage + 1
@@ -526,9 +553,13 @@ local function runVideoMenu()
         frame:addButton():setText("Next >"):setPosition(navX[2], footerRow):setSize(navW, 1)
             :setBackground(colors.gray):setForeground(colors.lime)
             :onClick(function() if page < totalPages then page = page + 1 end drawLibrary() end)
-        frame:addButton():setText(("Queue (%d)"):format(#playlist)):setPosition(navX[3], footerRow):setSize(navW, 1)
-            :setBackground(colors.gray):setForeground(colors.lime)
-            :onClick(function() nextScreen = "playlist" basalt.stop() end)
+        -- No queue button on the films list: nothing there can be queued, so
+        -- offering the screen would only ever lead to somebody else's list.
+        if not filmsOnly then
+            frame:addButton():setText(("Queue (%d)"):format(#playlist)):setPosition(navX[3], footerRow):setSize(navW, 1)
+                :setBackground(colors.gray):setForeground(colors.lime)
+                :onClick(function() nextScreen = "playlist" basalt.stop() end)
+        end
         frame:addButton():setText("Menu"):setPosition(backX, footerRow):setSize(backW, 1)
             :setBackground(colors.red):setForeground(colors.white)
             :onClick(function() exitReason = "menu" basalt.stop() end)
@@ -682,7 +713,7 @@ local function runVideoMenu()
                 if _G.MOVCCTWX_TERMINATED then return "quit" end
                 if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
                 -- Something may have been uploaded while that was playing.
-                videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+                videos, loadErrors = libraryList()
             end
         elseif nextScreen then
             screen = nextScreen
@@ -690,7 +721,7 @@ local function runVideoMenu()
             playVideoPlaylist(videoplayer, videos)
             if _G.MOVCCTWX_TERMINATED then return "quit" end
             if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
-            videos, loadErrors = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+            videos, loadErrors = libraryList()
         elseif playlistAction == "add" then
             screen = "addVideos"
         elseif playlistAction == "back" then
@@ -750,9 +781,9 @@ local function mainLoop()
         elseif screen == "menu" then
             _G.MOVCCTWX_STATUS = { screen = "menu" }
             screen = runMainMenu()
-        elseif screen == "video" then
+        elseif screen == "video" or screen == "movies" then
             _G.MOVCCTWX_STATUS = { screen = "video_menu" }
-            screen = runVideoMenu()
+            screen = runVideoMenu(screen == "movies")
             _G.MOVCCTWX_STATUS = { screen = "menu" }
         elseif screen == "music" then
             clearFrameChildren(frame)

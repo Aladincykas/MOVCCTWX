@@ -611,10 +611,13 @@ while true do
     -- Whole block (title + 5 buttons) centered vertically as one unit
     -- rather than pinned to the top with all the empty space dumped at
     -- the bottom.
-    local BLOCK_HEIGHT = 14 -- title(1) gap(2) 6 buttons w/ 1-row gaps (11)
+    local BLOCK_HEIGHT = 16 -- title(1) gap(2) 7 buttons w/ 1-row gaps (13)
     local blockTop = math.max(1, math.floor((h - BLOCK_HEIGHT) / 2) + 1)
     local titleY = blockTop
-    local btnY = { blockTop + 3, blockTop + 5, blockTop + 7, blockTop + 9, blockTop + 11, blockTop + 13 }
+    local btnY = {
+        blockTop + 3, blockTop + 5, blockTop + 7, blockTop + 9,
+        blockTop + 11, blockTop + 13, blockTop + 15,
+    }
 
     frame:addLabel():setText(config.TITLE:sub(1, w))
         :setPosition(math.max(1, math.floor((w - math.min(#config.TITLE, w)) / 2) + 1), titleY)
@@ -623,42 +626,59 @@ while true do
     frame:addButton():setText("Video Player"):setPosition(bx, btnY[1]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "video" basalt.stop() end)
-    frame:addButton():setText("Music Player"):setPosition(bx, btnY[2]):setSize(buttonW, 1)
+    -- Films browse separately from clips, same as on the computer. Which
+    -- repos hold them is config.lua's `films` flag, which the pocket reads
+    -- from the very same file the brain does.
+    frame:addButton():setText("Movies / Series"):setPosition(bx, btnY[2]):setSize(buttonW, 1)
+        :setBackground(colors.gray):setForeground(colors.lime)
+        :onClick(function() chosen = "movies" basalt.stop() end)
+    frame:addButton():setText("Music Player"):setPosition(bx, btnY[3]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "music" basalt.stop() end)
     -- "Playlist" was ambiguous the moment videos got one of their own.
-    frame:addButton():setText("Music Queue"):setPosition(bx, btnY[3]):setSize(buttonW, 1)
+    frame:addButton():setText("Music Queue"):setPosition(bx, btnY[4]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "playlist" basalt.stop() end)
-    frame:addButton():setText("Video Queue"):setPosition(bx, btnY[4]):setSize(buttonW, 1)
+    frame:addButton():setText("Video Queue"):setPosition(bx, btnY[5]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "videoplaylist" basalt.stop() end)
-    frame:addButton():setText("Now Playing"):setPosition(bx, btnY[5]):setSize(buttonW, 1)
+    frame:addButton():setText("Now Playing"):setPosition(bx, btnY[6]):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "nowplaying" basalt.stop() end)
-    frame:addButton():setText("Quit"):setPosition(bx, btnY[6]):setSize(buttonW, 1)
+    frame:addButton():setText("Quit"):setPosition(bx, btnY[7]):setSize(buttonW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function() chosen = "quit" basalt.stop() end)
 
     frame:draw()
     basalt.run()
 
-    if chosen == "video" then
-        local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
-        -- Fetched once so the "+" can show what is ALREADY queued; kept in
-        -- step locally as items are added, rather than a round trip per row.
-        local _, _, _, _, queue = send(brainId, "get_status")
-        local queued = {}
-        for _, item in ipairs(queue or {}) do queued[item.name] = true end
+    if chosen == "video" or chosen == "movies" then
+        local filmsOnly = chosen == "movies"
+        local all = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
+        local videos = {}
+        for _, v in ipairs(all) do
+            if (v.__films == true) == filmsOnly then videos[#videos + 1] = v end
+        end
 
-        local video = listScreen("VIDEOS", videos,
-            function(v) return (v.subs and "[S] " or "") .. v.name end,
-            function(v)
+        -- Only the clip list can queue anything, so only it needs to know
+        -- what is on the queue. Fetched once and kept in step locally as
+        -- items go on and off, rather than a round trip per row.
+        local queued = {}
+        local onAdd = nil
+        if not filmsOnly then
+            local _, _, _, _, queue = send(brainId, "get_status")
+            for _, item in ipairs(queue or {}) do queued[item.name] = true end
+            onAdd = function(v)
                 local action = queued[v.name] and "video_playlist_remove" or "video_playlist_add"
                 local ok, reason = send(brainId, action, v.name)
                 if ok then queued[v.name] = not queued[v.name]
                 else flash("Rejected: " .. tostring(reason), false) end
-            end,
+            end
+        end
+
+        local video = listScreen(filmsOnly and "MOVIES / SERIES" or "VIDEOS", videos,
+            function(v) return (v.subs and "[S] " or "") .. v.name end,
+            onAdd,
             function(v) return not v.__films end,
             function(v) return queued[v.name] and "-" or "+" end)
         if video then
