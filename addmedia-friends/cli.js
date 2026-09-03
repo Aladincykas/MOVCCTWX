@@ -125,7 +125,11 @@ function saveConfig(config) {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
-async function askRepoList(kind, defaults) {
+// labelPrefix: what shows up in menus/prompts for repos of this kind --
+// defaults to `kind` itself, but Video mode passes something clearer than
+// the generic word "Video" (see the call below).
+async function askRepoList(kind, defaults, labelPrefix) {
+    labelPrefix = labelPrefix || kind;
     const repos = [];
     console.log(`\n${kind} repos (blank to accept the suggested default, or type your own list):`);
     let n = 1;
@@ -140,7 +144,7 @@ async function askRepoList(kind, defaults) {
             if (repos.length === 0) continue;
             break;
         }
-        repos.push({ label: `${kind} ${n}`, repo, branch: "main" });
+        repos.push({ label: `${labelPrefix} ${n}`, repo, branch: "main" });
         n++;
         if (!suggestion && repos.length >= 1) {
             const more = await ask("  Add another? (y/N): ");
@@ -162,7 +166,10 @@ async function firstTimeSetup() {
     const token = await ask("Personal Access Token: ");
 
     const musicRepos = await askRepoList("Music", ["cctwmusics", "cctwmusics2", "cctwmusics3"]);
-    const videoRepos = await askRepoList("Video", ["KCTWM0", "KCTWM1"]);
+    // "Big Screen" / "Didziulis ekranas" instead of the generic "Video" --
+    // these two repos feed the 12-monitor wall specifically, so the label
+    // says what it actually is instead of a generic media category name.
+    const videoRepos = await askRepoList("Video", ["MOVCCTW0", "MOVCCTW1"], "Didziulis ekranas");
 
     const config = { owner, token, musicRepos, videoRepos };
     saveConfig(config);
