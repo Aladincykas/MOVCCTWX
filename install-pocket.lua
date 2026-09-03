@@ -1,7 +1,9 @@
 -- install-pocket.lua -- run this ONCE in-game on the pocket computer (the
--- one with a wireless modem crafted in). Downloads its 2 files straight
--- into this pocket computer's root. Overwrites whatever's already there,
--- so re-running this after a code update just re-pulls everything fresh.
+-- one with a wireless modem crafted in). Downloads its files straight
+-- into this pocket computer's root (startup.lua, config.lua, and a copy
+-- of basalt.lua -- the pocket UI is Basalt-based too). Overwrites
+-- whatever's already there, so re-running this after a code update just
+-- re-pulls everything fresh.
 --
 -- Run in-game:
 --   wget run https://raw.githubusercontent.com/Aladincykas/MOVCCTWX/main/install-pocket.lua
@@ -39,6 +41,12 @@ for _, absPath in ipairs(FILES) do
     print("  " .. absPath)
     download(BASE_URL .. absPath:sub(2), absPath)
 end
+
+-- basalt.lua isn't duplicated in pocket/ in the repo -- it's the exact
+-- same vendored framework file the brain computer uses, so this just
+-- reuses that copy instead of maintaining two identical files.
+print("  /basalt.lua")
+download(("https://raw.githubusercontent.com/%s/%s/%s/brain/basalt.lua"):format(GITHUB_USER, REPO, BRANCH), "/basalt.lua")
 
 -- Same reasoning as install-brain.lua's matching comment: CC caches
 -- loaded code in memory until reboot, so this reboots automatically
