@@ -192,7 +192,19 @@ function M.play(wall, screen, speakers, entry, config)
     -- the next part -- the clock it follows simply stops, and the video
     -- freezes for exactly as long as the stall lasts. Tracking this lets the
     -- picture carry on rather than waiting indefinitely.
-    local audioAdvancedMs = os.epoch("utc")
+    -- The audio clock as a SPAN, not a stored number: where the current
+    -- uninterrupted run of playback started, and when. Position is then
+    -- computed live from the wall clock whenever it is asked for.
+    --
+    -- Storing a value and refreshing it per audio block does not work: a
+    -- block is over a second of sound, so the clock sat frozen between
+    -- updates and then jumped. The picture paces to it, so it stalled and
+    -- rushed, over and over -- subtle but visible as the video speeding up
+    -- and slowing down. Audio plays at exactly real time, so elapsed real
+    -- time since the span began IS the position, continuously.
+    local audioSpanStartSec = nil
+    local audioSpanStartMs = nil
+    local audioFrozenSec = 0
     local audioFinished = false
 
     -- How much audio may sit in the speakers unheard. playAudio accepts
@@ -247,17 +259,11 @@ function M.play(wall, screen, speakers, entry, config)
         -- was tried and produced a slideshow, because the renderer could not
         -- catch up and so skipped nearly everything. Waiting when ahead is
         -- safe; skipping when behind is not.
-        if hasSeparateAudio and audioElapsedSec > 0 then
-            -- A brief gap is normal between blocks, so allow some slack. Past
-            -- that the audio has genuinely stopped advancing, and continuing
-            -- to wait would freeze the picture for the whole stall -- so keep
-            -- the picture moving on real time instead, and let it re-sync to
-            -- the sound as soon as audio starts flowing again.
-            local stalledMs = (os.epoch("utc") - audioAdvancedMs) - 1500
-            if stalledMs > 0 and not state.paused then
-                return audioElapsedSec + stalledMs / 1000
-            end
-            return audioElapsedSec
+        if hasSeparateAudio then
+            -- Paused, or between spans (re-opening the stream after a pause):
+            -- hold the last known position rather than letting it drift on.
+            if state.paused or not audioSpanStartMs then return audioFrozenSec end
+            return audioSpanStartSec + (os.epoch("utc") - audioSpanStartMs) / 1000
         end
         return (os.epoch("utc") - playStartMs - pausedMs) / 1000
     end
@@ -314,6 +320,8 @@ function M.play(wall, screen, speakers, entry, config)
                 local spanBytes = 0
                 posSec = spanStartSec
                 audioQueuedSec = spanStartSec
+                audioSpanStartSec, audioSpanStartMs = spanStartSec, spanStartMs
+                audioFrozenSec = spanStartSec
                 local pausedHere = false
 
                 while not state.stopRequested and not videoDone do
@@ -359,9 +367,11 @@ function M.play(wall, screen, speakers, entry, config)
 
                     spanBytes = spanBytes + #data
                     audioQueuedSec = spanStartSec + spanBytes / DFPWM_BYTES_PER_SECOND
+                    -- Only for the readouts and the feed throttle below; the
+                    -- clock the picture follows is computed live in clockSec.
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
-                    audioAdvancedMs = os.epoch("utc")
+                    audioFrozenSec = posSec
                 end
 
                 response.close()
@@ -374,6 +384,10 @@ function M.play(wall, screen, speakers, entry, config)
                     stopSpeakers()
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
+                    audioFrozenSec = posSec
+                    -- Ends the span: the clock holds at audioFrozenSec until a
+                    -- new span starts, instead of running on while silent.
+                    audioSpanStartMs = nil
                     -- Buffer was just discarded, so nothing is pending.
                     audioQueuedSec = posSec
                     reopenAtByte = math.max(0,
