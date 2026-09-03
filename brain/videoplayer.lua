@@ -222,53 +222,88 @@ function M.play(wall, screen, speakers, entry, config)
     local function streamAudio()
         if not hasSeparateAudio then return end
         local dfpwm = require("cc.audio.dfpwm")
-        local bytesQueued = 0
-        local audioStartMs = nil
+        local BLOCK = 16 * 1024
+
+        -- posSec is the position in the soundtrack that has actually been
+        -- HEARD, and it only moves while sound is coming out. Audio plays at
+        -- exactly real time, so within one uninterrupted span the wall clock
+        -- is the truth; a pause simply ends the span and starts a new one.
+        --
+        -- Counting bytes handed to playAudio does not work for this: it
+        -- returns as soon as a block is accepted rather than when it is
+        -- heard, and the speaker accepts several ahead, so the count runs
+        -- seconds in front of the sound.
+        local posSec = 0
+
+        local function stopSpeakers()
+            for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
+        end
+
         for _, url in ipairs(entry.audio) do
-            if state.stopRequested then break end
-            local response = http.get(url, nil, true)
-            if not response then break end
-            -- A fresh decoder per file: DFPWM is stateful, and each file was
-            -- encoded as its own stream, so state must not carry across.
-            local decoder = dfpwm.make_decoder()
-            while not state.stopRequested and not videoDone do
-                local data = response.read(16 * 1024)
-                if not data then break end
-                while state.paused and not state.stopRequested do
-                    os.pullEvent("video_control")
+            if state.stopRequested or videoDone then break end
+
+            local partStartSec = posSec
+            local reopenAtByte = 0
+            local partFinished = false
+
+            while not partFinished and not state.stopRequested and not videoDone do
+                -- Resuming re-requests the file from the byte the listener
+                -- actually got to. DFPWM is a constant 6000 bytes per second,
+                -- so that offset is exact arithmetic -- no seeking, no
+                -- guessing, and nothing is skipped or repeated across a pause.
+                local headers = nil
+                if reopenAtByte > 0 then
+                    headers = { Range = ("bytes=%d-"):format(reopenAtByte) }
                 end
-                if state.stopRequested then break end
-                local chunk = decoder(data)
-                local funcs = {}
-                for _, speaker in ipairs(speakers) do
-                    funcs[#funcs + 1] = function()
-                        while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
-                            os.pullEvent("speaker_audio_empty")
+                local response = http.get(url, headers, true)
+                if not response then break end
+
+                -- A fresh decoder per span: DFPWM is stateful, and a resumed
+                -- request starts mid-stream.
+                local decoder = dfpwm.make_decoder()
+                local spanStartMs = os.epoch("utc")
+                local spanStartSec = partStartSec + reopenAtByte / DFPWM_BYTES_PER_SECOND
+                posSec = spanStartSec
+                local pausedHere = false
+
+                while not state.stopRequested and not videoDone do
+                    if state.paused then pausedHere = true break end
+
+                    local data = response.read(BLOCK)
+                    if not data then partFinished = true break end
+
+                    local chunk = decoder(data)
+                    local funcs = {}
+                    for _, speaker in ipairs(speakers) do
+                        funcs[#funcs + 1] = function()
+                            while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
+                                os.pullEvent("speaker_audio_empty")
+                            end
                         end
                     end
+                    if #funcs > 0 then parallel.waitForAll(table.unpack(funcs)) end
+
+                    posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
+                    audioElapsedSec = posSec
                 end
-                if #funcs > 0 then parallel.waitForAll(table.unpack(funcs)) end
-                bytesQueued = bytesQueued + #data
-                if audioStartMs == nil then audioStartMs = os.epoch("utc") end
-                -- Position is the WALL CLOCK since playback began, not the
-                -- byte count -- audio plays at exactly real time, so once it
-                -- has started the clock is the truth.
-                --
-                -- Counting queued bytes overestimates instead: playAudio
-                -- returns as soon as a block is accepted, not when it has been
-                -- heard, and the speaker accepts several blocks before it
-                -- reports full. Measured in-game, that put this clock 2.5s
-                -- ahead of the sound -- and since video paces to it, every
-                -- frame looked 2.5s late and got dropped trying to catch up to
-                -- a time that had not happened yet.
-                --
-                -- Still clamped to what has actually been queued, so a stall
-                -- in fetching cannot let the clock run past real audio.
-                local byBytes = bytesQueued / DFPWM_BYTES_PER_SECOND
-                local byClock = (os.epoch("utc") - audioStartMs - pausedMs) / 1000
-                audioElapsedSec = math.max(0, math.min(byClock, byBytes))
+
+                response.close()
+
+                if pausedHere then
+                    -- Pausing has to DISCARD what the speaker is holding, not
+                    -- just stop feeding it. playAudio queues several seconds
+                    -- ahead, so without this the sound carried on playing well
+                    -- after the picture stopped.
+                    stopSpeakers()
+                    posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
+                    audioElapsedSec = posSec
+                    reopenAtByte = math.max(0,
+                        math.floor((posSec - partStartSec) * DFPWM_BYTES_PER_SECOND))
+                    while state.paused and not state.stopRequested do
+                        os.pullEvent("video_control")
+                    end
+                end
             end
-            response.close()
         end
         audioFinished = true
     end
@@ -329,6 +364,7 @@ function M.play(wall, screen, speakers, entry, config)
                             os.pullEvent("video_control")
                         end
                         pausedMs = pausedMs + (os.epoch("utc") - pauseBeganMs)
+                        lastFrameMs = os.epoch("utc")
                     end
                     if state.stopRequested then return end
 
@@ -521,7 +557,9 @@ function M.play(wall, screen, speakers, entry, config)
     -- and how long it has been since the last frame, so a stall names itself.
     local function statusLoop()
         while not state.stopRequested and not videoDone do
-            local stalledMs = os.epoch("utc") - lastFrameMs
+            -- Nothing decodes while paused, so lastFrameMs stops moving and
+            -- a pause would otherwise be reported as a freeze.
+            local stalledMs = state.paused and 0 or (os.epoch("utc") - lastFrameMs)
             drawControls(screen, state, entry, entry.durationSec or 0, {
                 driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
                 phase = phase,
