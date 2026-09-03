@@ -18,7 +18,6 @@ local BRANCH = "main"
 -- instead of always overwriting the real files at root).
 local FILES = {
     "/startup.lua",
-    "/config.lua",
 }
 
 local BASE_URL = ("https://raw.githubusercontent.com/%s/%s/%s/pocket/"):format(GITHUB_USER, REPO, BRANCH)
@@ -54,6 +53,19 @@ end
 -- reuses that copy instead of maintaining two identical files.
 print("  /basalt.lua")
 download(("https://raw.githubusercontent.com/%s/%s/%s/brain/basalt.lua"):format(GITHUB_USER, REPO, BRANCH), "/basalt.lua")
+
+-- config.lua comes from brain/ as well, rather than a second copy under
+-- pocket/. There used to be one, with a comment telling whoever edited it
+-- to keep the library lists in sync by hand -- and that is precisely what
+-- went wrong: a video repo was renamed on the brain, the pocket kept
+-- pointing at the old one, and newly uploaded videos simply did not appear
+-- on the remote. Both computers read the same manifests, so they must read
+-- the same list of repos, and the only way to guarantee that is for there
+-- to be one file. Everything the pocket needs (TITLE, GITHUB_USER, the
+-- library lists, REMOTE_PROTOCOL) is already in the brain's config; the
+-- extra keys it carries are simply unused here.
+print("  /config.lua")
+download(("https://raw.githubusercontent.com/%s/%s/%s/brain/config.lua"):format(GITHUB_USER, REPO, BRANCH), "/config.lua")
 
 -- Same reasoning as install-brain.lua's matching comment: CC caches
 -- loaded code in memory until reboot, so this reboots automatically

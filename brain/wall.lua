@@ -116,8 +116,36 @@ function M.open(config)
         forEach(function(mon) mon.setPaletteColor(table.unpack(args, 1, args.n)) end)
     end
 
+    -- What each individual TILE last had written to each of its own lines.
+    -- Keyed [monitorRow][monitorCol][lineWithinThatMonitor].
+    --
+    -- Callers already skip full wall rows that are unchanged, but a full row
+    -- spans all four column monitors, so a change anywhere in it previously
+    -- re-blitted all four. On a wall showing one moving subject that is
+    -- mostly waste: the outer monitors are usually holding identical content
+    -- frame to frame.
+    --
+    -- This matters far more than it looks. Every tile write is TWO peripheral
+    -- calls (setCursorPos + blit), so a full 120-row wall costs 960 calls per
+    -- frame -- ~19,200 a second at 20fps, which CC cannot move. Measured
+    -- in-game: 96% of frames were being dropped because drawing one frame
+    -- took longer than twenty-five frames' worth of time.
+    local tileCache = {}
+    local function resetTileCache()
+        tileCache = {}
+        for r = 1, rows do
+            tileCache[r] = {}
+            for c = 1, cols do tileCache[r][c] = {} end
+        end
+    end
+    resetTileCache()
+
     function wall.clear()
         forEach(function(mon) mon.clear() end)
+        -- The cache describes what is physically on each tile; wiping the
+        -- monitors makes every entry a lie, and stale entries would suppress
+        -- the redraw that is meant to put the content back.
+        resetTileCache()
     end
 
     -- Only used by videoplayer.lua's cursor-based text writes (loading
@@ -143,11 +171,22 @@ function M.open(config)
     -- local x coordinates.
     function wall.blit(text, fg, bg)
         local r, localY = cursorRow, cursorLocalY
+        local rowTiles = tileCache[r]
         for c = 1, cols do
             local startX = (c - 1) * tileW + 1
-            local slice = function(s) return s:sub(startX, startX + tileW - 1) end
-            grid[r][c].setCursorPos(1, localY)
-            grid[r][c].blit(slice(text), slice(fg), slice(bg))
+            local endX = startX + tileW - 1
+            local t = text:sub(startX, endX)
+            local f = fg:sub(startX, endX)
+            local b = bg:sub(startX, endX)
+            -- Comparing the concatenation is a few string ops; skipping the
+            -- write saves two peripheral calls, which cost vastly more.
+            local key = t .. f .. b
+            local cache = rowTiles[c]
+            if cache[localY] ~= key then
+                grid[r][c].setCursorPos(1, localY)
+                grid[r][c].blit(t, f, b)
+                cache[localY] = key
+            end
         end
     end
 
