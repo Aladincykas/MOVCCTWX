@@ -18,19 +18,14 @@ return {
         { label = "Didziulis ekranas 2", repo = "MOVCCTW1", branch = "main" },
     },
 
-    -- The 4x3 monitor wall. Fill in the real peripheral names once the
-    -- monitors are placed and networked (see peripheral.getNames() -- run
-    -- from the brain computer's own terminal to list them). Order matters:
-    -- row-major, left-to-right then top-to-bottom, exactly matching how the
-    -- monitors are physically arranged. Each entry is one 8x6-block monitor
-    -- cluster; wall.lua reads their individual getSize() at runtime and
-    -- assumes every monitor in the grid is the same size.
+    -- The 4x3 monitor wall. Row-major, left-to-right then top-to-bottom,
+    -- confirmed against the real wall via brain/identify-monitors.lua.
     WALL_COLUMNS = 4,
     WALL_ROWS = 3,
     WALL_MONITOR_NAMES = {
-        "monitor_0", "monitor_1", "monitor_2", "monitor_3",
-        "monitor_4", "monitor_5", "monitor_6", "monitor_7",
-        "monitor_8", "monitor_9", "monitor_10", "monitor_11",
+        "monitor_299", "monitor_307", "monitor_308", "monitor_300",
+        "monitor_298", "monitor_297", "monitor_301", "monitor_304",
+        "monitor_306", "monitor_305", "monitor_302", "monitor_303",
     },
     WALL_TEXT_SCALE = 1.0,
 
