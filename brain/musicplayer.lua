@@ -540,6 +540,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 style.init(wallW, wallH)
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
+                wallviz.resetCache() -- the clear wiped every row; see resetCache
                 local nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
 
                 -- 0.15s (~7fps). CC's Lua is single-threaded -- this
@@ -558,6 +559,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                         style.init(wallW, wallH)
                         wall.setBackgroundColor(colors.black)
                         wall.clear()
+                        wallviz.resetCache() -- the clear wiped every row; see resetCache
                         nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
                     end
                     style.step(wallW, wallH, state.paused)
@@ -573,6 +575,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 end
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
+                wallviz.resetCache() -- the clear wiped every row; see resetCache
             end)
         end
 
@@ -642,14 +645,32 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             local decoder = dfpwm.make_decoder()
             local chunkSize = 16 * 1024
 
-            while not state.stopRequested do
+            -- Decode-ahead (double buffering). The old loop was strictly
+            -- sequential: push a buffer, WAIT for speaker_audio_empty,
+            -- then read+decode the next chunk, then push. But
+            -- speaker_audio_empty fires when the speaker has already
+            -- DRAINED -- so the decode (16KB of pure-Lua DFPWM work, not
+            -- cheap) happened while the speaker had nothing left to play.
+            -- That silence is exactly the "audio cuts for a split second"
+            -- report. Now the NEXT chunk is decoded as a parallel branch
+            -- alongside the push/wait for the CURRENT one: the decode is
+            -- CPU-bound and never yields, so it completes while the
+            -- speaker branch is blocked waiting for its ack -- meaning
+            -- the next buffer is already sitting ready the instant the
+            -- speaker asks for more.
+            local function readNext()
+                local c = response.read(chunkSize)
+                if not c then return nil end
+                return decoder(c)
+            end
+
+            local buffer = readNext()
+
+            while not state.stopRequested and buffer do
                 while state.paused and not state.stopRequested do
                     os.pullEvent("music_control")
                 end
                 if state.stopRequested then break end
-
-                local chunk = response.read(chunkSize)
-                if not chunk then break end
 
                 -- Dispatch to every speaker IN PARALLEL, not one at a time.
                 -- The old version looped speakers sequentially, each
@@ -665,7 +686,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 -- wait could resume on a DIFFERENT speaker's empty event
                 -- and retry too early), with a 3s timeout so one dead
                 -- speaker among many can't stall the whole song.
-                local buffer = decoder(chunk)
+                local nextBuffer = nil
                 if #speakers > 0 then
                     local funcs = {}
                     for _, speaker in ipairs(speakers) do
@@ -686,8 +707,16 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                             end
                         end
                     end
+                    -- Added LAST on purpose: the speaker branches above get
+                    -- resumed first (so playAudio fires immediately), then
+                    -- this one runs its decode while they're parked waiting
+                    -- for their acks.
+                    funcs[#funcs + 1] = function() nextBuffer = readNext() end
                     parallel.waitForAll(table.unpack(funcs))
+                else
+                    nextBuffer = readNext()
                 end
+                buffer = nextBuffer
             end
 
             response.close()

@@ -24,19 +24,50 @@ end
 
 local BG_HEX = colors.toBlit(colors.black)
 
+-- What's currently on each row of the wall, as the exact bg string last
+-- blitted there. Rows that come out byte-for-byte identical next frame
+-- get skipped entirely instead of re-blitted.
+--
+-- This matters a lot more than it looks: one wall.blit() is really FOUR
+-- real monitor.blit() peripheral calls (one per column of monitors), and
+-- a full wall is dozens of rows -- so an undiffed redraw is hundreds of
+-- peripheral calls, several times a second, on the same single thread
+-- the audio coroutine needs. videoplayer.lua has always diffed its rows
+-- for exactly this reason; this file never did, which left the visuals
+-- competing with playback for CPU far harder than they needed to (heard
+-- as audio cutting out for a split second).
+--
+-- MUST be reset whenever something else blanks the wall (wall.clear(),
+-- style switches) -- otherwise the cache claims rows still hold content
+-- that's actually been wiped, and those rows never get redrawn. See
+-- M.resetCache and its call sites in musicplayer.lua.
+local rowCache = {}
+
+function M.resetCache()
+    rowCache = {}
+end
+
 -- Shared helper: blits one full-wall frame from a per-cell function
 -- fn(row, col) -> colors.XXX or nil (nil = black/empty cell). Every style
 -- below is just a different fn.
 local function blitFrame(wall, cols, rows, fn)
     local blankText = (" "):rep(cols)
+    -- blit()'s fg argument has to be real hex-digit characters even though
+    -- a blank space glyph never shows its foreground -- reusing the spaces
+    -- string for it was wrong, just quietly tolerated.
+    local blankFg = BG_HEX:rep(cols)
     for r = 1, rows do
         local bg = {}
         for c = 1, cols do
             local color = fn(r, c)
             bg[c] = color and colors.toBlit(color) or BG_HEX
         end
-        wall.setCursorPos(1, r)
-        wall.blit(blankText, blankText, table.concat(bg))
+        local bgStr = table.concat(bg)
+        if rowCache[r] ~= bgStr then
+            wall.setCursorPos(1, r)
+            wall.blit(blankText, blankFg, bgStr)
+            rowCache[r] = bgStr
+        end
     end
 end
 
