@@ -303,11 +303,28 @@ local function transportScreen(brainId, kind, name, initialStatus)
     updatePlaylist(nil)
 
     local stopped = false
+    -- Whether the brain has confirmed, at least once, that it really is
+    -- playing what this screen was opened for. Until it has, a mismatched
+    -- status just means the brain hasn't started yet -- only AFTER seeing it
+    -- play does a mismatch mean playback has ended.
+    local sawPlaying = (initialStatus and initialStatus.screen == kind) or false
+
     basalt.schedule(function()
         while not stopped do
             local ok, _, newStatus, newPlaylist = send(brainId, "get_status")
             if ok then
                 status = newStatus
+                if newStatus and newStatus.screen == kind then
+                    sawPlaying = true
+                elseif sawPlaying then
+                    -- Playback finished (or was stopped from the computer).
+                    -- Close this screen instead of sitting on it showing a
+                    -- timestamp frozen at the end of the video, which looked
+                    -- exactly like the remote having hung.
+                    stopped = true
+                    basalt.stop()
+                    return
+                end
                 updateLabels()
                 updatePlaylist(newPlaylist)
             end

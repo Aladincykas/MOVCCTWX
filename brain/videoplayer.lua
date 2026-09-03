@@ -547,6 +547,13 @@ function M.play(wall, screen, speakers, entry, config)
     screen.setBackgroundColor(colors.black)
     screen.setTextColor(colors.white)
     screen.clear()
+    -- Hand the remote a status that says playback is OVER. Without this the
+    -- last frame's status stayed on _G.MOVCCTWX_STATUS with screen="video",
+    -- so the pocket kept polling, kept being told a video was playing, and
+    -- sat on its transport screen showing a frozen final timestamp with no
+    -- way back except Back. musicplayer.lua has always done this on exit;
+    -- videoplayer never did.
+    _G.MOVCCTWX_STATUS = { screen = "video_menu" }
     return result
 end
 
