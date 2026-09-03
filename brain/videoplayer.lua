@@ -254,9 +254,32 @@ function M.play(wall, screen, speakers, entry, config)
                     lastControlsDraw = now
                 end
 
-                while os.epoch("utc") < frameStart + (frameIndex + 1) / fps * 1000 do
-                    os.sleep(1 / fps)
-                    if state.stopRequested then break end
+                -- Pace to the frame schedule WITHOUT spending a whole game
+                -- tick on every frame.
+                --
+                -- os.sleep's resolution is one tick (50ms), so ANY sleep --
+                -- even os.sleep(1/25), which asks for 40ms -- costs at least
+                -- 50ms. Sleeping once per frame therefore caps playback at
+                -- 20fps no matter how fast the decode and draw actually are.
+                -- A 25fps video then runs ~20% slower than real time, and
+                -- since the speakers play at real time regardless, audio
+                -- chunks arrive later and later and the buffer keeps running
+                -- dry. That is heard as audio cutting out constantly while
+                -- the video itself looks perfectly smooth -- confirmed
+                -- in-game, and the reason frame-dropping alone did not fix
+                -- it: dropping made drawing cheaper, but the per-frame sleep
+                -- was the thing setting the ceiling.
+                --
+                -- So sleep only when there is a full tick or more to wait.
+                -- Otherwise yield through a queued event, which hands control
+                -- to the audio dispatcher and input coroutines without
+                -- costing a tick.
+                local waitMs = frameStart + (frameIndex + 1) / fps * 1000 - os.epoch("utc")
+                if waitMs >= 50 then
+                    os.sleep(waitMs / 1000)
+                elseif not state.stopRequested then
+                    os.queueEvent("kx_frame_yield")
+                    os.pullEvent("kx_frame_yield")
                 end
             end,
             onAudioChunk = function(chunk)
