@@ -13,9 +13,17 @@ return {
         { label = "Library 3", repo = "cctwmusics3", branch = "main" },
     },
 
+    -- Every repo here is merged into one browsable list in-game, so the
+    -- split is purely about where uploads GO, not what plays. Films get
+    -- their own repos because a feature film is ~5GB against ~150MB for a
+    -- clip -- keeping them apart means a movie repo can be deleted outright
+    -- to reclaim the space (deleting FILES reclaims nothing; every chunk is
+    -- a commit and git keeps history) without taking the clips with it.
     VIDEO_LIBRARIES = {
         { label = "Didziulis ekranas 1", repo = "MOVCCTW2", branch = "main" },
         { label = "Didziulis ekranas 2", repo = "MOVCCTW1", branch = "main" },
+        { label = "Didziulis ekranas - MOVIES ONLY 1", repo = "MOVCCTW3", branch = "main" },
+        { label = "Didziulis ekranas - MOVIES ONLY 2", repo = "MOVCCTW4", branch = "main" },
     },
 
     -- The 4x3 monitor wall. Row-major, left-to-right then top-to-bottom,
