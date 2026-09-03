@@ -277,8 +277,15 @@ local function transportScreen(brainId, kind, name, initialStatus)
     -- poll tick instead of recreating them -- avoids the same kind of
     -- per-tick widget churn/redraw cost that caused the audio-jump issue
     -- on the computer's wall visuals.
+    --
+    -- MUSIC ONLY. A queue is a music idea -- songs line up behind the one
+    -- playing -- and there is no video equivalent, so on a video the header
+    -- could only ever read "Queue (0)": a permanently empty box taking up
+    -- half the remote's screen and implying a feature that does not exist.
+    -- The same screen serves both, so it just leaves this part out for
+    -- video and the transport controls sit on their own.
     local plTop, plBottom = 10, h - 1
-    local plCapacity = math.max(0, plBottom - plTop)
+    local plCapacity = (kind == "music") and math.max(0, plBottom - plTop) or 0
     if plCapacity > 0 then
         playlistHeader = frame:addLabel():setPosition(1, plTop):setForeground(colors.lime):setBackground(colors.black)
         for i = 1, plCapacity do
