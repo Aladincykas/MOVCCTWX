@@ -219,17 +219,35 @@ function M.run(mon, speakers, config, frame, startSongName, wall)
     -- random-walk step in the wall-viz coroutine below), rendered as one
     -- wall.blit() call per row, each of which internally fans out across
     -- all WALL_COLUMNS monitors (see wall.lua).
+    --
+    -- Filled cells are a blank space on a COLORED BACKGROUND, not a "#"
+    -- character on a colored foreground -- a text glyph only covers part
+    -- of its cell and has gaps, which reads as a faint sparse texture from
+    -- a distance instead of a solid block. A colored background fills the
+    -- whole cell, so each "on" column reads as one solid rectangle of
+    -- color stacked on the next, much closer to solid cubes/bars from
+    -- across a room.
+    -- blit()'s text/fg/bg must all be the same length, and fg must be
+    -- valid hex-digit characters even though a blank space glyph never
+    -- shows its foreground color -- these two rows are memoized per width
+    -- (recomputed only if the wall's column count ever changes) instead of
+    -- rebuilt every single frame.
+    local BLANK_TEXT_ROW, BLANK_FG_ROW, MEMO_LEN = nil, nil, 0
     local BG_HEX = colors.toBlit(colors.black)
     local function drawWallFrame(wall, vizHeights, cols, rows)
+        if cols ~= MEMO_LEN then
+            BLANK_TEXT_ROW = (" "):rep(cols)
+            BLANK_FG_ROW = BG_HEX:rep(cols)
+            MEMO_LEN = cols
+        end
         for r = 1, rows do
-            local textChars, fgChars = {}, {}
-            local fgHex = colors.toBlit(vizRowColor(r, rows))
+            local bgChars = {}
+            local onHex = colors.toBlit(vizRowColor(r, rows))
             for c = 1, cols do
-                textChars[c] = (vizHeights[c] >= (rows - r + 1)) and "#" or " "
-                fgChars[c] = fgHex
+                bgChars[c] = (vizHeights[c] >= (rows - r + 1)) and onHex or BG_HEX
             end
             wall.setCursorPos(1, r)
-            wall.blit(table.concat(textChars), table.concat(fgChars), BG_HEX:rep(cols))
+            wall.blit(BLANK_TEXT_ROW, BLANK_FG_ROW, table.concat(bgChars))
         end
     end
 
