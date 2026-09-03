@@ -136,13 +136,27 @@ function M.play(wall, screen, speakers, entry, config)
     local cumulativeSec = 0
     local result = "done"
 
-    for chunkIndex, url in ipairs(entry.chunks) do
+    -- Only the FIRST chunk is a real wait. Every chunk after it is fetched
+    -- in the background while the previous one is still playing (see the
+    -- prefetch branch inside the parallel block below), so there's no
+    -- per-chunk "Loading part N/M..." pause between them -- the video just
+    -- keeps going. Previously every chunk boundary meant a visible stall
+    -- while that chunk downloaded, which got worse the shorter the
+    -- segments were.
+    drawStatus(screen, ("Loading %s..."):format(entry.name))
+    local file = fetchChunkToMemory(entry.chunks[1])
+    local nextFile = nil
+
+    for chunkIndex = 1, #entry.chunks do
         if state.stopRequested then break end
 
-        drawStatus(screen, ("Loading %s (part %d/%d)..."):format(entry.name, chunkIndex, #entry.chunks))
-
-        local file = fetchChunkToMemory(url)
-        drawStatus(screen, ("Decoding %s (part %d/%d)..."):format(entry.name, chunkIndex, #entry.chunks))
+        -- Normally already prefetched. This only runs if a prefetch
+        -- failed (it's pcall'd below, so a hiccup downgrades to fetching
+        -- here rather than killing playback).
+        if not file then
+            drawStatus(screen, ("Loading %s (part %d/%d)..."):format(entry.name, chunkIndex, #entry.chunks))
+            file = fetchChunkToMemory(entry.chunks[chunkIndex])
+        end
 
         local function saveVolume()
             savedSettings.videoVolume = state.volume
@@ -298,6 +312,16 @@ function M.play(wall, screen, speakers, entry, config)
                         elseif action == "vol+10" then adjustVolume(0.10)
                         end
                     end
+                end,
+                function() -- prefetch the NEXT chunk while this one plays
+                    local nextUrl = entry.chunks[chunkIndex + 1]
+                    if not nextUrl then return end
+                    -- pcall'd on purpose: a failed prefetch must not take
+                    -- down playback of the chunk currently on screen. The
+                    -- loop just fetches it normally next time round
+                    -- instead (with the loading message), same as before.
+                    local ok, result = pcall(fetchChunkToMemory, nextUrl)
+                    if ok then nextFile = result end
                 end
             )
         end)
@@ -321,6 +345,10 @@ function M.play(wall, screen, speakers, entry, config)
             result = "stopped"
             break
         end
+
+        -- Hand the already-downloaded next chunk to the next iteration.
+        file = nextFile
+        nextFile = nil
     end
 
     wall.setBackgroundColor(colors.black)
