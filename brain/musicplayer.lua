@@ -315,6 +315,17 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         local function drawNowPlaying()
             clearFrameChildren(frame)
 
+            -- Re-measure the screen fresh for THIS song, don't reuse the
+            -- w/h captured once back when M.run() started (possibly many
+            -- songs ago). If the terminal's actual size ever changes
+            -- mid-session (GUI scale, window resize) and layout keeps
+            -- using the old numbers, later songs can position controls
+            -- below the screen's real current height -- they'd exist,
+            -- just off-screen, which reads as "buttons vanished after
+            -- another song played". Re-measuring every song closes that
+            -- gap regardless of what changed the size.
+            w, h = mon.getSize()
+
             f:addLabel()
                 :setText((" NOW PLAYING "):sub(1, w))
                 :setSize(w, 1)
@@ -344,15 +355,24 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
             centerWidth = showPlaylist and leftW or w
 
             if showPlaylist then
-                f:addLabel():setText(("PLAYLIST (%d)"):format(#playlist):sub(1, rightW))
-                    :setPosition(rightX, 1):setForeground(colors.lime):setBackground(colors.black)
+                -- Solid gray panel behind the whole sidebar, not just
+                -- individual text rows on the same black as everything
+                -- else -- one full-width blank label per row, drawn
+                -- first so the text labels below sit on top of it.
+                for row = 1, h do
+                    f:addLabel():setText((" "):rep(rightW)):setSize(rightW, 1)
+                        :setPosition(rightX, row):setBackground(colors.gray)
+                end
+
+                f:addLabel():setText((" PLAYLIST (%d) "):format(#playlist):sub(1, rightW)):setSize(rightW, 1)
+                    :setPosition(rightX, 1):setForeground(colors.lime):setBackground(colors.gray)
                 if #playlist == 0 then
-                    f:addLabel():setText(("(empty)"):sub(1, rightW))
-                        :setPosition(rightX, 3):setForeground(colors.gray):setBackground(colors.black)
+                    f:addLabel():setText(("(empty)"):sub(1, rightW)):setSize(rightW, 1)
+                        :setPosition(rightX, 3):setForeground(colors.lightGray):setBackground(colors.gray)
                 else
                     for i = 1, math.min(#playlist, h - 3) do
-                        f:addLabel():setText(playlist[i].name:sub(1, rightW))
-                            :setPosition(rightX, 2 + i):setForeground(colors.white):setBackground(colors.black)
+                        f:addLabel():setText(playlist[i].name:sub(1, rightW)):setSize(rightW, 1)
+                            :setPosition(rightX, 2 + i):setForeground(colors.white):setBackground(colors.gray)
                     end
                 end
             end
