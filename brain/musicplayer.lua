@@ -543,15 +543,22 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                 wallviz.resetCache() -- the clear wiped every row; see resetCache
                 local nextSwitchMs = os.epoch("utc") + STYLE_SWITCH_MS
 
-                -- 0.15s (~7fps). CC's Lua is single-threaded -- this
-                -- coroutine, the DFPWM streaming loop, and the speaker
-                -- dispatcher all take turns on the same CPU budget between
-                -- yields. 0.1s (10fps, matching video) made plasma's real
-                -- per-cell trig math run often enough to risk delaying the
-                -- audio coroutine's turn -- reported in-game as audio
-                -- jumping/stuttering during playback. This is a middle
-                -- ground between that and the original 0.3s, which read
-                -- as too sluggish.
+                -- Redraw interval scales with how big the wall actually
+                -- is, instead of one fixed rate. CC's Lua is
+                -- single-threaded: this coroutine, the DFPWM streaming
+                -- loop and the speaker dispatcher all share one CPU
+                -- budget between yields, and a redraw's cost is
+                -- proportional to the wall's cell count. 0.1s at the
+                -- default size already starved the audio coroutine badly
+                -- enough to be audible; at WALL_TEXT_SCALE 0.5 the same
+                -- wall has FOUR times the cells, so a fixed rate that's
+                -- fine at one scale is far too aggressive at the other.
+                -- Backing off automatically means changing the scale
+                -- doesn't silently reintroduce audio stutter.
+                local cells = wallW * wallH
+                local frameInterval = (cells <= 20000 and 0.15)
+                    or (cells <= 60000 and 0.25)
+                    or 0.4
                 while not state.stopRequested do
                     if not state.paused and os.epoch("utc") >= nextSwitchMs then
                         styleIndex = styleIndex + 1
@@ -571,7 +578,7 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
                     -- song's basalt.run() session and wipe ITS wall
                     -- output mid-playback (confirmed in-game during
                     -- playlist auto-advance).
-                    waitTick(0.15)
+                    waitTick(frameInterval)
                 end
                 wall.setBackgroundColor(colors.black)
                 wall.clear()
