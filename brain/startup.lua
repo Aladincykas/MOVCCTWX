@@ -150,12 +150,22 @@ local function fetchMergedManifest(libraries, manifestFile)
     for _, lib in ipairs(libraries) do
         local url = ("https://raw.githubusercontent.com/%s/%s/%s/%s?t=%s")
             :format(config.GITHUB_USER, lib.repo, lib.branch, manifestFile, tostring(os.epoch("utc")))
-        local ok, response = pcall(http.get, url)
-        local parsed = nil
+        -- On a failing status http.get returns nil, a message, and the
+        -- response handle -- which is the only thing carrying the code.
+        local ok, response, _, failResponse = pcall(http.get, url)
+        local parsed, empty = nil, false
         if ok and response then
             local body = response.readAll()
             response.close()
             parsed = textutils.unserialiseJSON(body)
+        elseif ok and failResponse then
+            -- 404 means the repo simply has no manifest yet, which is exactly
+            -- what a freshly created library looks like before anything has
+            -- been uploaded to it. That is not a failure and reporting it as
+            -- one turns a normal empty repo into a permanent red warning.
+            local code = failResponse.getResponseCode and failResponse.getResponseCode() or nil
+            empty = (code == 404)
+            pcall(failResponse.close)
         end
         if type(parsed) == "table" then
             for _, item in ipairs(parsed) do
@@ -167,7 +177,7 @@ local function fetchMergedManifest(libraries, manifestFile)
                     table.insert(items, item)
                 end
             end
-        else
+        elseif not empty then
             table.insert(failed, lib.label or lib.repo)
         end
     end
@@ -458,7 +468,9 @@ local function runVideoMenu()
 
         local note, noteColor
         if #loadErrors > 0 then
-            note = ("%d video(s) -- %d librar(ies) did not load"):format(#videos, #loadErrors)
+            -- Named, not counted. "1 library did not load" tells you there
+            -- is a problem but not which repo to go and look at.
+            note = ("%d video(s) -- unavailable: %s"):format(#videos, table.concat(loadErrors, ", "))
             noteColor = colors.red
         elseif #videos == 0 then
             note = "No videos yet."

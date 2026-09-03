@@ -135,7 +135,8 @@ function M.open(config)
         tileCache = {}
         for r = 1, rows do
             tileCache[r] = {}
-            for c = 1, cols do tileCache[r][c] = {} end
+            -- Three parallel tables rather than one of joined keys: see blit.
+            for c = 1, cols do tileCache[r][c] = { t = {}, f = {}, b = {} } end
         end
     end
     resetTileCache()
@@ -148,19 +149,26 @@ function M.open(config)
         resetTileCache()
     end
 
-    -- Only used by videoplayer.lua's cursor-based text writes (loading
-    -- messages) -- routes to whichever single tile that (x,y) falls in and
-    -- remembers it for the next write()/blit() call on this wall object.
+    -- Works out which tile an (x,y) falls in and remembers it for the next
+    -- write()/blit() on this wall object.
+    --
+    -- Deliberately does NOT move the real cursor. Every caller of this is a
+    -- full-row draw that goes on to call blit(), and blit sets the cursor
+    -- itself on each tile it actually writes -- so the peripheral call that
+    -- used to be here was doing nothing except costing a call. At 120 rows
+    -- and 20fps that is 2,400 wasted peripheral calls a second, on the one
+    -- resource this whole file exists to economise. write() does the move
+    -- itself now, which is the only place that ever needed it.
     local cursorRow, cursorCol, cursorLocalX, cursorLocalY
     function wall.setCursorPos(x, y)
         cursorCol = math.min(cols, math.floor((x - 1) / tileW) + 1)
         cursorRow = math.min(rows, math.floor((y - 1) / tileH) + 1)
         cursorLocalX = x - (cursorCol - 1) * tileW
         cursorLocalY = y - (cursorRow - 1) * tileH
-        grid[cursorRow][cursorCol].setCursorPos(cursorLocalX, cursorLocalY)
     end
 
     function wall.write(text)
+        grid[cursorRow][cursorCol].setCursorPos(cursorLocalX, cursorLocalY)
         grid[cursorRow][cursorCol].write(text)
     end
 
@@ -178,14 +186,21 @@ function M.open(config)
             local t = text:sub(startX, endX)
             local f = fg:sub(startX, endX)
             local b = bg:sub(startX, endX)
-            -- Comparing the concatenation is a few string ops; skipping the
-            -- write saves two peripheral calls, which cost vastly more.
-            local key = t .. f .. b
+            -- The three pieces are compared separately rather than joined
+            -- into one key. Joining them built a fresh string the width of a
+            -- whole tile for every tile of every frame, purely to throw it
+            -- away after the comparison -- on this wall that is 480 strings a
+            -- frame, near enough 2MB a second of garbage for the collector to
+            -- chase, on the same single Lua thread that decodes and draws.
+            -- Comparing three strings costs the same character-for-character
+            -- and allocates nothing.
             local cache = rowTiles[c]
-            if cache[localY] ~= key then
+            if cache.t[localY] ~= t or cache.f[localY] ~= f or cache.b[localY] ~= b then
                 grid[r][c].setCursorPos(1, localY)
                 grid[r][c].blit(t, f, b)
-                cache[localY] = key
+                cache.t[localY] = t
+                cache.f[localY] = f
+                cache.b[localY] = b
             end
         end
     end
