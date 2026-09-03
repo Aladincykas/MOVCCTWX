@@ -124,15 +124,23 @@ local function runMainMenu()
     local buttonW = math.min(w - 4, 22)
     local bx = math.max(1, math.floor((w - buttonW) / 2) + 1)
 
+    -- Whole block (title + 3 buttons) centered vertically as one unit,
+    -- not pinned near the top -- previously left a big dead gap below the
+    -- buttons on a tall screen.
+    local BLOCK_HEIGHT = 8 -- title(1) gap(2) 3 buttons w/ 1-row gaps between (5)
+    local blockTop = math.max(2, math.floor((h - BLOCK_HEIGHT) / 2) + 1)
+    local titleY = blockTop
+    local btn1Y, btn2Y, btn3Y = titleY + 3, titleY + 5, titleY + 7
+
     frame:addLabel()
         :setText(title)
-        :setPosition(math.max(1, math.floor((w - #title) / 2) + 1), 2)
+        :setPosition(math.max(1, math.floor((w - #title) / 2) + 1), titleY)
         :setForeground(colors.lime)
         :setBackground(colors.black)
 
     frame:addButton()
         :setText("VIDEO PLAYER")
-        :setPosition(bx, 5)
+        :setPosition(bx, btn1Y)
         :setSize(buttonW, 1)
         :setBackground(colors.gray)
         :setForeground(colors.lime)
@@ -140,11 +148,42 @@ local function runMainMenu()
 
     frame:addButton()
         :setText("MUSIC PLAYER")
-        :setPosition(bx, 7)
+        :setPosition(bx, btn2Y)
         :setSize(buttonW, 1)
         :setBackground(colors.gray)
         :setForeground(colors.lime)
         :onClick(function() chosen = "music" basalt.stop() end)
+
+    -- Checks _G.MOVCCTWX_STATUS directly (no rednet needed -- this IS the
+    -- brain). Note: mainLoop can only ever be running runMainMenu() while
+    -- screen == "menu", and _G.MOVCCTWX_STATUS is always set to
+    -- {screen="menu"} right before that -- so seeing this button at all
+    -- already means nothing is currently playing ON THIS COMPUTER. Unlike
+    -- the pocket's Now Playing (a genuinely separate device that might
+    -- not be following along), this exists mostly for UI parity; it's
+    -- not being dishonest by usually saying "nothing playing" -- that's
+    -- just always true here.
+    frame:addButton()
+        :setText("NOW PLAYING")
+        :setPosition(bx, btn3Y)
+        :setSize(buttonW, 1)
+        :setBackground(colors.gray)
+        :setForeground(colors.lime)
+        :onClick(function()
+            clearFrameChildren(frame)
+            local status = _G.MOVCCTWX_STATUS
+            local msg = (status and (status.screen == "video" or status.screen == "music"))
+                and ("Playing: " .. (status.name or "?"))
+                or "Nothing playing right now"
+            frame:addLabel()
+                :setText(msg:sub(1, w))
+                :setPosition(math.max(1, math.floor((w - math.min(#msg, w)) / 2) + 1), math.floor(h / 2))
+                :setForeground(colors.lightGray):setBackground(colors.black)
+            frame:addButton():setText("Back"):setPosition(bx, h - 1):setSize(buttonW, 1)
+                :setBackground(colors.gray):setForeground(colors.lime)
+                :onClick(function() chosen = "menu" basalt.stop() end)
+            frame:draw()
+        end)
 
     -- Remote menu-level commands (open a submenu, or jump straight into a
     -- named video/song) are handled by the single global watcher below
