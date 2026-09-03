@@ -906,12 +906,27 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
     -- out into its own function so both that button AND a remote
     -- "play_playlist" command (see startWithPlaylist below) can trigger
     -- the exact same behavior instead of duplicating it.
+    -- A queue empties as it plays. Each track comes off the list once it has
+    -- actually finished, so what is still on the list is always what is still
+    -- to come -- which is the whole difference between a queue and a saved
+    -- playlist you replay. Stopping part way leaves the current track at the
+    -- front, because it has not been heard through.
+    --
+    -- Always index 1, never a running counter: this list is shared with the
+    -- pocket remote, which can add or remove entries WHILE this is playing,
+    -- and a counter would then be pointing at the wrong track.
     local function playThroughPlaylist()
-        local i = 1
-        while i <= #playlist and not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
-            local reason = playSong(playlist[i], "Back to Playlist")
+        while #playlist > 0 and not exitReason and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+            local song = playlist[1]
+            local reason = playSong(song, "Back to Playlist")
             if reason ~= "finished" then break end
-            i = i + 1
+            -- Guarded because a remote playlist_remove during playback may
+            -- already have taken this one off; removing blindly would then
+            -- throw away the NEXT track instead.
+            if playlist[1] == song then
+                table.remove(playlist, 1)
+                _G.MOVCCTWX_SAVE_PLAYLIST()
+            end
         end
     end
 

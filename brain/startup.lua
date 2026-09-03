@@ -395,19 +395,31 @@ end
 -- defeat the point of a queue.
 local function playVideoPlaylist(videoplayer, videos)
     local playlist = _G.MOVCCTWX_VIDEO_PLAYLIST
-    local i = 1
-    while i <= #playlist and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+    -- The queue empties as it plays, same as the music one: what is left on
+    -- the list is always what is still to come. Always index 1 rather than a
+    -- running counter, because the remote can add and remove entries while
+    -- this is running and a counter would drift off the real position.
+    while #playlist > 0 and not _G.MOVCCTWX_TERMINATED and not _G.MOVCCTWX_REMOTE_PENDING do
+        local item = playlist[1]
         local match = nil
         for _, v in ipairs(videos) do
-            if v.name == playlist[i].name then match = v break end
+            if v.name == item.name then match = v break end
         end
         if match then
             local reason = videoplayer.play(getWall("video"), term, speakers, match, config)
-            -- "stopped" means somebody pressed stop, which should end the
-            -- whole queue rather than move to the next one.
+            -- Stopped rather than finished: leave it at the front, since it
+            -- has not been watched through, and end the queue there.
             if reason ~= "done" then break end
         end
-        i = i + 1
+        -- A name with no video behind it any more comes off too. It can never
+        -- play, and leaving it would block the queue permanently.
+        --
+        -- Guarded because the remote may have removed this entry during
+        -- playback; removing blindly would then drop the NEXT one instead.
+        if playlist[1] == item then
+            table.remove(playlist, 1)
+            _G.MOVCCTWX_SAVE_VIDEO_PLAYLIST()
+        end
     end
 end
 
