@@ -68,7 +68,7 @@ end
 -- elapsed/remaining, volume, and the key controls. No touch targets --
 -- input here is keyboard (at the computer) or a remote command relayed
 -- from the pocket computer via remote.lua.
-local function drawControls(screen, state, entry, totalDurationSec, dropPct, diag)
+local function drawControls(screen, state, entry, totalDurationSec, diag)
     local elapsed = state.elapsedSec
     local remaining = math.max(0, totalDurationSec - elapsed)
     local pct = math.floor(state.volume / state.maxVolume * 100 + 0.5)
@@ -81,24 +81,19 @@ local function drawControls(screen, state, entry, totalDurationSec, dropPct, dia
     screen.setCursorPos(1, 2)
     screen.write(("%s %s / -%s   Vol %d%%"):format(
         state.paused and "PAUSED" or "PLAYING", formatTime(elapsed), formatTime(remaining), pct))
-    -- How much video is being dropped to keep audio intact (see
-    -- onVideoFrame). 0% means the wall is comfortably keeping up; a high,
-    -- steady number means the encode is asking for more frames per second
-    -- than this wall can physically draw, and re-encoding at a lower fps
-    -- would give smoother motion than dropping does.
-    if dropPct and dropPct > 0 then
-        screen.setCursorPos(1, 3)
-        screen.setTextColor(dropPct >= 25 and colors.orange or colors.lightGray)
-        screen.write(("Praleista kadru: %d%%"):format(dropPct))
-        screen.setTextColor(colors.white)
-    end
     if diag then
         screen.setCursorPos(1, 4)
-        screen.setTextColor(math.abs(diag.driftSec) >= 0.5 and colors.orange or colors.lightGray)
-        screen.write(("drift %+.1fs  queue %d"):format(diag.driftSec, diag.queued))
+        local stalled = (diag.stalledSec or 0) >= 1.5
+        screen.setTextColor(stalled and colors.red or colors.lightGray)
+        screen.write(("%s  dalis %d/%d  drift %+.1fs")
+            :format(diag.phase or "?", diag.chunk or 0, diag.chunkCount or 0, diag.driftSec or 0))
+        if stalled then
+            screen.setCursorPos(1, 5)
+            screen.write(("NEJUDA %.1fs"):format(diag.stalledSec))
+        end
         screen.setTextColor(colors.white)
     end
-    screen.setCursorPos(1, 6)
+    screen.setCursorPos(1, 7)
     screen.write("[space] play/pause  [s] stop  [left/right] volume  [q] quit")
 end
 
@@ -187,6 +182,13 @@ function M.play(wall, screen, speakers, entry, config)
     -- Set when the last video chunk is done, so the audio stream stops with
     -- it rather than holding playback open to the end of the soundtrack.
     local videoDone = false
+    -- Progress the status coroutine reports on. It runs independently of
+    -- decoding, so the computer's screen keeps updating even when decoding
+    -- has stopped -- which is the difference between "the whole computer
+    -- froze" and "here is exactly where it stopped".
+    local phase = "starting"
+    local currentChunk = 0
+    local lastFrameMs = os.epoch("utc")
 
     -- Only the FIRST chunk is a real wait. Every chunk after it is fetched
     -- in the background while the previous one is still playing (see the
@@ -284,6 +286,7 @@ function M.play(wall, screen, speakers, entry, config)
     local function videoLoop()
         for chunkIndex = 1, #entry.chunks do
             if state.stopRequested then break end
+            currentChunk = chunkIndex
 
             -- Normally already prefetched. This only runs if a prefetch
             -- failed (it's pcall'd below, so a hiccup downgrades to fetching
@@ -306,8 +309,6 @@ function M.play(wall, screen, speakers, entry, config)
             local fps = 10
             local lastPalette, lastRows = {}, {}
             local framesPlayed = 0
-            local framesDropped = 0
-            local lastControlsDraw = 0
 
             local audioQueue = {}
             local audioQueueTail = 0
@@ -331,27 +332,6 @@ function M.play(wall, screen, speakers, entry, config)
                     end
                     if state.stopRequested then return end
 
-                    -- Draw only if this frame is still roughly on time.
-                    --
-                    -- Rendering one wall frame is up to 480 monitor calls (120
-                    -- rows x 4 column monitors) and at 25fps has 40ms to do it
-                    -- in. When it can't, drawing every frame anyway means the
-                    -- decode loop -- which also feeds the speakers, since audio
-                    -- and video are interleaved in the same stream -- falls
-                    -- permanently behind real time. The speaker buffer then
-                    -- drains before the next chunk arrives, heard as audio
-                    -- cutting out every couple of seconds. Confirmed in-game on
-                    -- a 324x120 wall at 25fps.
-                    --
-                    -- A dropped video frame is far less noticeable than a gap in
-                    -- the sound, so lateness is paid for in frames rather than
-                    -- audio, and the loop can catch back up instead of sliding
-                    -- further behind.
-                    --
-                    -- Skipping deliberately does NOT touch lastPalette/lastRows:
-                    -- those describe what is actually on the wall, the wall still
-                    -- holds the last frame drawn, so the caches stay truthful and
-                    -- the next frame that does get drawn diffs against reality.
                     local dueSec = cumulativeSec + (frameIndex - 1) / fps
                     -- Every frame is drawn, in order. Dropping late frames to
                     -- chase the audio clock was tried and made things visibly
@@ -363,57 +343,8 @@ function M.play(wall, screen, speakers, entry, config)
                     state.elapsedSec = dueSec
                     framesPlayed = frameIndex
 
-                    -- Controls redraw at ~2Hz, not every video frame -- the
-                    -- computer's own screen isn't the thing being paced to fps.
-                    -- _G.MOVCCTWX_STATUS is read by remote.lua and attached to
-                    -- every rednet ack it sends, so the pocket computer's
-                    -- transport screen can show live title/paused/elapsed/
-                    -- volume without a separate round trip.
-                    local now = os.epoch("utc")
-                    if now - lastControlsDraw > 500 then
-                        local dropPct = framesPlayed > 0
-                            and math.floor(framesDropped / framesPlayed * 100 + 0.5) or 0
-                        -- drift > 0 means the media clock is BEHIND real time,
-                        -- i.e. decoding cannot keep up and the speakers will run
-                        -- dry no matter how the dispatcher behaves. queued is how
-                        -- many decoded audio chunks are waiting to be played: if
-                        -- drift is ~0 and queued stays at 0, the gap is in
-                        -- production; if queued grows, it is in dispatch.
-                        local diag = {
-                            driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
-                            queued = audioQueueTail - audioQueueHead + 1,
-                        }
-                        drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
-                        _G.MOVCCTWX_STATUS = {
-                            screen = "video",
-                            name = entry.name,
-                            paused = state.paused,
-                            elapsedSec = state.elapsedSec,
-                            volumePct = math.floor(state.volume / state.maxVolume * 100 + 0.5),
-                        }
-                        lastControlsDraw = now
-                    end
+                    lastFrameMs = os.epoch("utc")
 
-                    -- Pace to the frame schedule WITHOUT spending a whole game
-                    -- tick on every frame.
-                    --
-                    -- os.sleep's resolution is one tick (50ms), so ANY sleep --
-                    -- even os.sleep(1/25), which asks for 40ms -- costs at least
-                    -- 50ms. Sleeping once per frame therefore caps playback at
-                    -- 20fps no matter how fast the decode and draw actually are.
-                    -- A 25fps video then runs ~20% slower than real time, and
-                    -- since the speakers play at real time regardless, audio
-                    -- chunks arrive later and later and the buffer keeps running
-                    -- dry. That is heard as audio cutting out constantly while
-                    -- the video itself looks perfectly smooth -- confirmed
-                    -- in-game, and the reason frame-dropping alone did not fix
-                    -- it: dropping made drawing cheaper, but the per-frame sleep
-                    -- was the thing setting the ceiling.
-                    --
-                    -- So sleep only when there is a full tick or more to wait.
-                    -- Otherwise yield through a queued event, which hands control
-                    -- to the audio dispatcher and input coroutines without
-                    -- costing a tick.
                     while not state.stopRequested do
                         local aheadSec = (cumulativeSec + frameIndex / fps) - clockSec()
                         if aheadSec <= 0 then break end
@@ -439,6 +370,7 @@ function M.play(wall, screen, speakers, entry, config)
                 end,
             }
 
+            phase = "playing"
             local playOk, playErr = pcall(function()
                 parallel.waitForAll(
                     function()
@@ -448,6 +380,11 @@ function M.play(wall, screen, speakers, entry, config)
                         os.queueEvent("kx_audio_wake")
                     end,
                     function() -- audio dispatcher: drains the queue, fans each chunk out
+                        -- Nothing feeds this queue when audio is a separate
+                        -- stream, so it would sit blocked on an event that
+                        -- never comes until decoding happens to end. One less
+                        -- coroutine that can hold up the chunk boundary.
+                        if hasSeparateAudio then return end
                         -- to every networked speaker in sync (waits for each speaker's own
                         -- speaker_audio_empty ack, with a 3s per-speaker timeout).
                         local head = audioQueueHead
@@ -539,7 +476,16 @@ function M.play(wall, screen, speakers, entry, config)
                 )
             end)
 
-            for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
+            phase = "chunk end"
+            -- NOT stopped when audio is a separate stream: those same speakers
+            -- are mid-way through playing the continuous soundtrack, and
+            -- stopping them here would cut it at every chunk boundary (and can
+            -- leave the audio coroutine waiting for a speaker_audio_empty that
+            -- never arrives, because the buffer was discarded rather than
+            -- played out). Only the old interleaved path needs this.
+            if not hasSeparateAudio then
+                for _, speaker in ipairs(speakers) do pcall(speaker.stop) end
+            end
             resetPalette(wall)
 
             if not playOk then
@@ -566,7 +512,35 @@ function M.play(wall, screen, speakers, entry, config)
         videoDone = true
     end
 
-    parallel.waitForAll(videoLoop, streamAudio)
+    -- Redraws the computer's own screen on a timer of its own, rather than
+    -- from inside the frame handler. Previously the only thing that drew the
+    -- controls was onVideoFrame, so anything that stopped decoding also froze
+    -- the display -- and a frozen screen looks identical whether playback has
+    -- deadlocked, stalled on a download, or simply ended. This separates
+    -- "what is on screen" from "is decoding running", and reports the phase
+    -- and how long it has been since the last frame, so a stall names itself.
+    local function statusLoop()
+        while not state.stopRequested and not videoDone do
+            local stalledMs = os.epoch("utc") - lastFrameMs
+            drawControls(screen, state, entry, entry.durationSec or 0, {
+                driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
+                phase = phase,
+                chunk = currentChunk,
+                chunkCount = #entry.chunks,
+                stalledSec = stalledMs / 1000,
+            })
+            _G.MOVCCTWX_STATUS = {
+                screen = "video",
+                name = entry.name,
+                paused = state.paused,
+                elapsedSec = state.elapsedSec,
+                volumePct = math.floor(state.volume / state.maxVolume * 100 + 0.5),
+            }
+            os.sleep(0.5)
+        end
+    end
+
+    parallel.waitForAll(videoLoop, streamAudio, statusLoop)
 
     wall.setBackgroundColor(colors.black)
     wall.clear()
