@@ -188,6 +188,15 @@ function M.play(wall, screen, speakers, entry, config)
     -- the sound you hear is from where the player thinks it is.
     local audioQueuedSec = 0
     local audioFinished = false
+
+    -- How much audio may sit in the speakers unheard. playAudio accepts
+    -- blocks until its own buffer is full, which turned out to be nearly six
+    -- seconds -- so the loop gulped audio far faster than real time and that
+    -- whole backlog became latency between the player and your ears.
+    --
+    -- Feeding is now paced to the listener instead: enough buffered to ride
+    -- out a slow fetch, not so much that the sound lags behind the picture.
+    local AUDIO_BUFFER_TARGET_SEC = 1.5
     -- Set when the last video chunk is done, so the audio stream stops with
     -- it rather than holding playback open to the end of the soundtrack.
     local videoDone = false
@@ -220,6 +229,19 @@ function M.play(wall, screen, speakers, entry, config)
     -- audio). audioElapsedSec is kept for the drift readout so the gap
     -- between the two stays visible.
     local function clockSec()
+        -- With a separate audio track, the SOUND is the reference: it plays at
+        -- real time and it is what the viewer is actually synchronised to.
+        -- Otherwise the picture ends up ahead by however long the first chunk
+        -- took to download -- the video clock starts when playback is asked
+        -- for, the audio clock when audio genuinely begins. Measured in-game
+        -- at +3.4s, which is exactly what that download cost.
+        --
+        -- This is used ONLY to decide whether to WAIT. Frames are never
+        -- dropped to chase it: pacing video to audio and skipping late frames
+        -- was tried and produced a slideshow, because the renderer could not
+        -- catch up and so skipped nearly everything. Waiting when ahead is
+        -- safe; skipping when behind is not.
+        if hasSeparateAudio and audioElapsedSec > 0 then return audioElapsedSec end
         return (os.epoch("utc") - playStartMs - pausedMs) / 1000
     end
 
@@ -278,6 +300,17 @@ function M.play(wall, screen, speakers, entry, config)
                 local pausedHere = false
 
                 while not state.stopRequested and not videoDone do
+                    if state.paused then pausedHere = true break end
+
+                    -- Hold off while the speakers are already well supplied.
+                    -- posSec advances in real time as the sound is heard, so
+                    -- this settles at roughly AUDIO_BUFFER_TARGET_SEC ahead.
+                    while not state.stopRequested and not state.paused and not videoDone
+                        and (audioQueuedSec - posSec) > AUDIO_BUFFER_TARGET_SEC do
+                        os.sleep(0.1)
+                        posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
+                        audioElapsedSec = posSec
+                    end
                     if state.paused then pausedHere = true break end
 
                     local data = response.read(BLOCK)
