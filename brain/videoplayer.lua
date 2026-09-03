@@ -159,6 +159,32 @@ function M.play(wall, screen, speakers, entry, config)
     local pausedMs = 0
     local result = "done"
 
+    -- Videos encoded from 2026-09-03 onward carry their audio as separate
+    -- .dfpwm files (entry.audio) instead of interleaving it into the .32vid
+    -- stream. That matters because interleaved audio can only be produced as
+    -- fast as video frames are decoded AND drawn -- so anything that slows
+    -- rendering (a big wall, a busy server) starves the speakers, heard as
+    -- audio cutting out every couple of seconds even while the picture looks
+    -- perfectly smooth. Confirmed in-game on the 12-monitor wall.
+    --
+    -- With a separate stream the audio coroutine reads its own HTTP response
+    -- at its own pace, exactly like musicplayer.lua does, and nothing the
+    -- renderer does can interrupt it.
+    --
+    -- Older videos have no entry.audio and still use the interleaved path
+    -- below, so existing libraries keep working.
+    local hasSeparateAudio = type(entry.audio) == "table" and #entry.audio > 0
+
+    -- DFPWM is one bit per sample at 48kHz, i.e. exactly 6000 bytes per
+    -- second, always. So the number of audio bytes handed to the speakers is
+    -- an exact clock -- no timers, no drift, and it is the SAME clock the
+    -- listener hears. When a separate audio stream exists it becomes the
+    -- master clock and video follows it (dropping frames if it must), which
+    -- is how real players work and the opposite of pacing audio to video.
+    local DFPWM_BYTES_PER_SECOND = 6000
+    local audioElapsedSec = 0
+    local audioFinished = false
+
     -- Only the FIRST chunk is a real wait. Every chunk after it is fetched
     -- in the background while the previous one is still playing (see the
     -- prefetch branch inside the parallel block below), so there's no
@@ -166,6 +192,61 @@ function M.play(wall, screen, speakers, entry, config)
     -- keeps going. Previously every chunk boundary meant a visible stall
     -- while that chunk downloaded, which got worse the shorter the
     -- segments were.
+    -- The clock everything paces to. With separate audio that is real
+    -- playback position; without it, the wall clock -- which is still more
+    -- honest than counting frames, since a frame counter simply slows down
+    -- along with playback and never reveals that it has fallen behind.
+    local function clockSec()
+        if hasSeparateAudio then return audioElapsedSec end
+        return (os.epoch("utc") - playStartMs - pausedMs) / 1000
+    end
+
+    -- Streams entry.audio start to finish, independently of video decoding.
+    -- Same shape as musicplayer.lua's proven loop: read a block, decode it,
+    -- hand it to every speaker, and let playAudio's own back-pressure set the
+    -- pace (it returns false while the buffer is full, so waiting on
+    -- speaker_audio_empty naturally throttles this loop to real time).
+    local function streamAudio()
+        if not hasSeparateAudio then return end
+        local dfpwm = require("cc.audio.dfpwm")
+        local bytesQueued = 0
+        for _, url in ipairs(entry.audio) do
+            if state.stopRequested then break end
+            local response = http.get(url, nil, true)
+            if not response then break end
+            -- A fresh decoder per file: DFPWM is stateful, and each file was
+            -- encoded as its own stream, so state must not carry across.
+            local decoder = dfpwm.make_decoder()
+            while not state.stopRequested do
+                local data = response.read(16 * 1024)
+                if not data then break end
+                while state.paused and not state.stopRequested do
+                    os.pullEvent("video_control")
+                end
+                if state.stopRequested then break end
+                local chunk = decoder(data)
+                local funcs = {}
+                for _, speaker in ipairs(speakers) do
+                    funcs[#funcs + 1] = function()
+                        while not state.stopRequested and not speaker.playAudio(chunk, state.volume) do
+                            os.pullEvent("speaker_audio_empty")
+                        end
+                    end
+                end
+                if #funcs > 0 then parallel.waitForAll(table.unpack(funcs)) end
+                bytesQueued = bytesQueued + #data
+                -- playAudio returns once the block is QUEUED, not once it has
+                -- been heard, so what is already audible trails bytesQueued by
+                -- roughly the block still in the speaker's buffer. Subtracting
+                -- one block keeps video a touch behind the sound rather than
+                -- ahead of it, which reads far better than the reverse.
+                audioElapsedSec = math.max(0, (bytesQueued - 16 * 1024) / DFPWM_BYTES_PER_SECOND)
+            end
+            response.close()
+        end
+        audioFinished = true
+    end
+
     drawStatus(screen, ("Loading %s..."):format(entry.name))
     local file = fetchChunkToMemory(entry.chunks[1])
     local nextFile = nil
@@ -192,7 +273,6 @@ function M.play(wall, screen, speakers, entry, config)
         end
 
         local fps = 10
-        local frameStart = os.epoch("utc")
         local lastPalette, lastRows = {}, {}
         local framesPlayed = 0
         local framesDropped = 0
@@ -207,7 +287,6 @@ function M.play(wall, screen, speakers, entry, config)
             shouldStop = function() return state.stopRequested end,
             onHeader = function(_, _, headerFps)
                 fps = headerFps
-                frameStart = os.epoch("utc")
             end,
             onVideoFrame = function(frame, frameIndex)
                 if state.paused then
@@ -216,7 +295,6 @@ function M.play(wall, screen, speakers, entry, config)
                     local pauseBeganMs = os.epoch("utc")
                     while state.paused and not state.stopRequested do
                         os.pullEvent("video_control")
-                        frameStart = os.epoch("utc") - (frameIndex - 1) / fps * 1000
                     end
                     pausedMs = pausedMs + (os.epoch("utc") - pauseBeganMs)
                 end
@@ -243,13 +321,13 @@ function M.play(wall, screen, speakers, entry, config)
                 -- those describe what is actually on the wall, the wall still
                 -- holds the last frame drawn, so the caches stay truthful and
                 -- the next frame that does get drawn diffs against reality.
-                local dueMs = frameStart + (frameIndex - 1) / fps * 1000
-                if os.epoch("utc") - dueMs <= 1000 / fps then
+                local dueSec = cumulativeSec + (frameIndex - 1) / fps
+                if clockSec() - dueSec <= 1 / fps then
                     drawFrame(wall, frame, lastPalette, lastRows)
                 else
                     framesDropped = framesDropped + 1
                 end
-                state.elapsedSec = cumulativeSec + (frameIndex - 1) / fps
+                state.elapsedSec = hasSeparateAudio and audioElapsedSec or dueSec
                 framesPlayed = frameIndex
 
                 -- Controls redraw at ~2Hz, not every video frame -- the
@@ -269,7 +347,7 @@ function M.play(wall, screen, speakers, entry, config)
                     -- drift is ~0 and queued stays at 0, the gap is in
                     -- production; if queued grows, it is in dispatch.
                     local diag = {
-                        driftSec = (now - playStartMs - pausedMs) / 1000 - state.elapsedSec,
+                        driftSec = (now - playStartMs - pausedMs) / 1000 - clockSec(),
                         queued = audioQueueTail - audioQueueHead + 1,
                     }
                     drawControls(screen, state, entry, entry.durationSec or 0, dropPct, diag)
@@ -303,12 +381,21 @@ function M.play(wall, screen, speakers, entry, config)
                 -- Otherwise yield through a queued event, which hands control
                 -- to the audio dispatcher and input coroutines without
                 -- costing a tick.
-                local waitMs = frameStart + (frameIndex + 1) / fps * 1000 - os.epoch("utc")
-                if waitMs >= 50 then
-                    os.sleep(waitMs / 1000)
-                elseif not state.stopRequested then
-                    os.queueEvent("kx_frame_yield")
-                    os.pullEvent("kx_frame_yield")
+                while not state.stopRequested do
+                    local aheadSec = (cumulativeSec + frameIndex / fps) - clockSec()
+                    if aheadSec <= 0 then break end
+                    if aheadSec >= 0.05 then
+                        os.sleep(aheadSec)
+                    else
+                        -- Under one game tick left. os.sleep cannot resolve
+                        -- finer than a tick, so sleeping here would overshoot
+                        -- and cap playback below the encoded frame rate; yield
+                        -- through a queued event instead, which lets the audio
+                        -- and input coroutines run without costing a tick.
+                        os.queueEvent("kx_frame_yield")
+                        os.pullEvent("kx_frame_yield")
+                        break
+                    end
                 end
             end,
             onAudioChunk = function(chunk)
@@ -321,6 +408,12 @@ function M.play(wall, screen, speakers, entry, config)
 
         local playOk, playErr = pcall(function()
             parallel.waitForAll(
+                -- Only started for the first chunk: entry.audio covers the
+                -- WHOLE video, not one chunk, so it must keep streaming
+                -- straight across chunk boundaries rather than restarting.
+                function()
+                    if chunkIndex == 1 then streamAudio() end
+                end,
                 function()
                     decodeModule.decode(file, handlers)
                     cumulativeSec = cumulativeSec + framesPlayed / fps
