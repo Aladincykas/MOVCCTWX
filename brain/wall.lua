@@ -56,6 +56,33 @@ function M.open(config)
         return totalW, totalH
     end
 
+    -- Music visuals and video want DIFFERENT text scales on the same
+    -- physical wall, so the scale is switchable at runtime rather than
+    -- fixed once at open().
+    --
+    -- 0.5 (the most characters CC allows) makes the wall 648x240 -- great
+    -- for the music visualizer, which only redraws a couple of times a
+    -- second anyway. Video at that size is a different story: ~58x the
+    -- old single monitor's data per frame, at 25fps, which means both an
+    -- unreasonable render load and .32vid chunks too big for GitHub to
+    -- accept unless the segments are cut so short that playback stalls to
+    -- reload every few seconds. Video therefore runs the wall at 1.0
+    -- (324x120) instead. See config.lua's WALL_TEXT_SCALE_MUSIC/VIDEO.
+    function wall.setScale(scale)
+        tileW, tileH = nil, nil
+        for r = 1, rows do
+            for c = 1, cols do
+                local mon = grid[r][c]
+                mon.setTextScale(scale)
+                local w, h = mon.getSize()
+                if tileW == nil then tileW, tileH = w, h end
+            end
+        end
+        totalW, totalH = tileW * cols, tileH * rows
+        wall.tileW, wall.tileH = tileW, tileH
+        return totalW, totalH
+    end
+
     -- Applies fn(mon) to every monitor in the grid.
     local function forEach(fn)
         for r = 1, rows do

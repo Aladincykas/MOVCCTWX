@@ -136,11 +136,18 @@ local function fetchMergedManifest(libraries, manifestFile)
 end
 
 local wallInstance = nil
-local function getWall()
+-- mode: "music" or "video" -- the wall runs at a different text scale for
+-- each (see config.lua's WALL_TEXT_SCALE_MUSIC/VIDEO for why). Applied on
+-- every call, not just the first, since the same wall gets handed back
+-- and forth between the two.
+local function getWall(mode)
     if not wallInstance then
         local wallModule = require("wall")
         wallInstance = wallModule.open(config)
     end
+    local scale = (mode == "music" and config.WALL_TEXT_SCALE_MUSIC)
+        or (mode == "video" and config.WALL_TEXT_SCALE_VIDEO)
+    if scale then wallInstance.setScale(scale) end
     return wallInstance
 end
 
@@ -291,7 +298,7 @@ local function runVideoMenu()
         if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
 
         if selectedVideo then
-            local wall = getWall()
+            local wall = getWall("video")
             videoplayer.play(wall, term, speakers, selectedVideo, config)
             if _G.MOVCCTWX_TERMINATED then return "quit" end
             if _G.MOVCCTWX_REMOTE_PENDING then return "menu" end
@@ -328,7 +335,7 @@ local function mainLoop()
                     local videos = fetchMergedManifest(config.VIDEO_LIBRARIES, "videos.json")
                     local match = nil
                     for _, v in ipairs(videos) do if v.name == screen.name then match = v end end
-                    if match then videoplayer.play(getWall(), term, speakers, match, config) end
+                    if match then videoplayer.play(getWall("video"), term, speakers, match, config) end
                 end
                 _G.MOVCCTWX_STATUS = { screen = "menu" }
                 screen = "menu"
@@ -348,7 +355,7 @@ local function mainLoop()
             clearFrameChildren(frame)
             _G.MOVCCTWX_STATUS = { screen = "music_menu" }
             local musicplayer = require("musicplayer")
-            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall(), pendingPlayAllPlaylist)
+            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall("music"), pendingPlayAllPlaylist)
             pendingSongName = nil
             pendingPlayAllPlaylist = false
             _G.MOVCCTWX_STATUS = { screen = "menu" }

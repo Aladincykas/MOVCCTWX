@@ -27,16 +27,29 @@ return {
         "monitor_298", "monitor_297", "monitor_301", "monitor_304",
         "monitor_306", "monitor_305", "monitor_302", "monitor_303",
     },
-    -- 0.5 is CC's smallest text scale = the MOST characters. Each 8x6
-    -- monitor goes from 81x40 characters (scale 1.0) to 162x80, so the
-    -- 4x3 wall goes from 324x120 to 648x240 -- 4x the cells, i.e. 4x the
-    -- rendering work per frame. musicplayer.lua's visualizer notices the
-    -- bigger wall and slows its own redraw rate to compensate (see the
-    -- frameInterval note there), so this shouldn't cost audio quality.
-    -- Videos must be encoded at the MATCHING size or they won't fill the
-    -- wall -- addmedia asks for it; enter 648x240 for this scale, 324x120
-    -- if you set this back to 1.0.
-    WALL_TEXT_SCALE = 0.5,
+    -- The wall switches text scale depending on what's on it, because
+    -- music visuals and video have completely different needs.
+    --
+    -- MUSIC 0.5: CC's smallest text scale = the MOST characters. Each 8x6
+    -- monitor goes from 81x40 characters to 162x80, so the wall is
+    -- 648x240 -- 4x the detail. The visualizer only redraws a couple of
+    -- times a second, so it can afford that, and it automatically slows
+    -- its own redraw rate on a bigger wall (see musicplayer.lua's
+    -- frameInterval).
+    --
+    -- VIDEO 1.0: 324x120. Video needs ~25fps, and at 0.5 that's ~58x the
+    -- old single monitor's data per frame -- both far too much to render
+    -- and far too big to upload (the segments would have to be so short
+    -- that playback stalls to reload every few seconds). 1.0 keeps each
+    -- individual monitor at roughly the per-monitor load the old
+    -- single-monitor build already handled fine.
+    --
+    -- Videos must be ENCODED at the matching size (324x120) -- addmedia
+    -- does that automatically when you pick "Didziulis ekranas".
+    WALL_TEXT_SCALE_MUSIC = 0.5,
+    WALL_TEXT_SCALE_VIDEO = 1.0,
+    -- Fallback for anything that opens the wall without saying which mode.
+    WALL_TEXT_SCALE = 1.0,
 
     -- rednet protocol string shared with the pocket computer(s).
     REMOTE_PROTOCOL = "movcctwx-remote",
