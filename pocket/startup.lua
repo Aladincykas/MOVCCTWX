@@ -292,8 +292,8 @@ local function playlistScreen(brainId, playlist)
             :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
 
         if #playlist == 0 then
-            frame:addLabel():setText("(empty)"):setPosition(1, contentTop):setForeground(colors.gray):setBackground(colors.black)
-            frame:addLabel():setText("Add from Music Player"):setPosition(1, contentTop + 1):setForeground(colors.gray):setBackground(colors.black)
+            frame:addLabel():setText(("(empty)"):sub(1, w)):setPosition(1, contentTop):setForeground(colors.gray):setBackground(colors.black)
+            frame:addLabel():setText(("Add from Music Player"):sub(1, w)):setPosition(1, contentTop + 1):setForeground(colors.gray):setBackground(colors.black)
         else
             local removeW = 3
             local startIdx = (page - 1) * perPage + 1
