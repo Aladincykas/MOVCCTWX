@@ -85,8 +85,12 @@ local function drawControls(screen, state, entry, totalDurationSec, diag)
         screen.setCursorPos(1, 4)
         local stalled = (diag.stalledSec or 0) >= 1.5
         screen.setTextColor(stalled and colors.red or colors.lightGray)
-        screen.write(("%s  dalis %d/%d  drift %+.1fs")
-            :format(diag.phase or "?", diag.chunk or 0, diag.chunkCount or 0, diag.driftSec or 0))
+        -- drift: picture position minus where the player believes the sound
+        -- is (+ = picture ahead). buf: audio handed to the speakers but not
+        -- yet heard -- the real latency, which drift alone cannot show.
+        screen.write(("%s %d/%d drift %+.1fs buf %.1fs")
+            :format(diag.phase or "?", diag.chunk or 0, diag.chunkCount or 0,
+                diag.driftSec or 0, diag.bufSec or 0))
         if stalled then
             screen.setCursorPos(1, 5)
             screen.write(("NEJUDA %.1fs"):format(diag.stalledSec))
@@ -178,6 +182,11 @@ function M.play(wall, screen, speakers, entry, config)
     -- is how real players work and the opposite of pacing audio to video.
     local DFPWM_BYTES_PER_SECOND = 6000
     local audioElapsedSec = 0
+    -- How far into the soundtrack has been HANDED to the speakers, as opposed
+    -- to audioElapsedSec which is how far has been heard. The gap between the
+    -- two is what is sitting in the speaker's buffer -- i.e. how far behind
+    -- the sound you hear is from where the player thinks it is.
+    local audioQueuedSec = 0
     local audioFinished = false
     -- Set when the last video chunk is done, so the audio stream stops with
     -- it rather than holding playback open to the end of the soundtrack.
@@ -263,7 +272,9 @@ function M.play(wall, screen, speakers, entry, config)
                 local decoder = dfpwm.make_decoder()
                 local spanStartMs = os.epoch("utc")
                 local spanStartSec = partStartSec + reopenAtByte / DFPWM_BYTES_PER_SECOND
+                local spanBytes = 0
                 posSec = spanStartSec
+                audioQueuedSec = spanStartSec
                 local pausedHere = false
 
                 while not state.stopRequested and not videoDone do
@@ -296,6 +307,8 @@ function M.play(wall, screen, speakers, entry, config)
                     -- effect now rather than after another block is queued.
                     if state.paused then pausedHere = true break end
 
+                    spanBytes = spanBytes + #data
+                    audioQueuedSec = spanStartSec + spanBytes / DFPWM_BYTES_PER_SECOND
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
                 end
@@ -310,6 +323,8 @@ function M.play(wall, screen, speakers, entry, config)
                     stopSpeakers()
                     posSec = spanStartSec + (os.epoch("utc") - spanStartMs) / 1000
                     audioElapsedSec = posSec
+                    -- Buffer was just discarded, so nothing is pending.
+                    audioQueuedSec = posSec
                     reopenAtByte = math.max(0,
                         math.floor((posSec - partStartSec) * DFPWM_BYTES_PER_SECOND))
                     while state.paused and not state.stopRequested do
@@ -575,6 +590,7 @@ function M.play(wall, screen, speakers, entry, config)
             local stalledMs = state.paused and 0 or (os.epoch("utc") - lastFrameMs)
             drawControls(screen, state, entry, entry.durationSec or 0, {
                 driftSec = hasSeparateAudio and (state.elapsedSec - audioElapsedSec) or 0,
+                bufSec = hasSeparateAudio and math.max(0, audioQueuedSec - audioElapsedSec) or 0,
                 phase = phase,
                 chunk = currentChunk,
                 chunkCount = #entry.chunks,
