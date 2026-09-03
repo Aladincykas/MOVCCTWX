@@ -67,7 +67,9 @@ return {
     -- computer IDs here later (os.getComputerID() on their end) -- this
     -- stays a list on purpose so that's a config change, not a code change.
     REMOTE_ALLOWLIST = {
-        2789,
+        2789, -- owner's pocket computer
+        2791,
+        2792,
     },
 
     MENU_MUSIC_VOLUME = 0.5,
