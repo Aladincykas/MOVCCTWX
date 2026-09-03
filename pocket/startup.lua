@@ -73,8 +73,16 @@ local function fetchMergedManifest(libraries, manifestFile)
     return items
 end
 
+-- Truncates to the screen width -- a Pocket Computer's screen is only 26
+-- columns (much narrower than the computer's own terminal), and text
+-- longer than that wraps onto the NEXT row instead of just getting cut
+-- off, corrupting whatever's drawn there. Every text write in this file
+-- goes through this (or explicitly :sub(1,w)'s itself) for exactly that
+-- reason -- confirmed in-game as real corruption ("leaking" text) from
+-- a couple of lines that weren't truncated yet.
 local function centerText(y, text, fg)
     local w = term.getSize()
+    text = text:sub(1, w)
     term.setCursorPos(math.max(1, math.floor((w - #text) / 2) + 1), y)
     if fg then term.setTextColor(fg) end
     term.write(text)
@@ -129,7 +137,7 @@ local function pickFromList(title, items, labelFn, onAdd)
         term.setTextColor(colors.lightGray)
         term.setCursorPos(1, h)
         term.clearLine()
-        term.write(onAdd and "Up/Down Enter=play A=add Q=back" or "Up/Down Enter=play Q=back")
+        term.write((onAdd and "Up/Down Enter=play A=add Q=back" or "Up/Down Enter=play Q=back"):sub(1, w))
 
         local event, key = os.pullEvent("key")
         if key == keys.up then
@@ -205,49 +213,63 @@ local function transportScreen(brainId, kind, name, initialStatus)
 end
 
 -- Playlist screen: view the current (shared -- see remote.lua/
--- musicplayer.lua) playlist, remove songs from it, or play through the
--- whole thing. A digit key (1-9) removes that row directly -- no up/down
--- selector here, the screen's too small for a cursor AND a remove button
--- per row at once. P plays the whole playlist and hands off to the same
--- transportScreen used for a single song (musicplayer.lua's
--- _G.MOVCCTWX_STATUS already reports whichever song is CURRENTLY playing
--- within the playlist, so the generic transport screen just works here
--- too, title and all).
+-- musicplayer.lua) playlist, same up/down cursor selector as pickFromList
+-- (the music/video browsers), Enter removes the highlighted song, P plays
+-- the whole playlist and hands off to the same transportScreen used for a
+-- single song (musicplayer.lua's _G.MOVCCTWX_STATUS already reports
+-- whichever song is CURRENTLY playing within the playlist, so the generic
+-- transport screen just works here too, title and all).
 -- playlist: the initial contents (from whatever get_status/play_* call
 -- got us here) -- refetched after every remove so this stays accurate.
 local function playlistScreen(brainId, playlist)
-    while true do
-        local w, h = term.getSize()
-        local top = 3
-        local perPage = h - top - 2
+    local w, h = term.getSize()
+    local top = 3
+    local perPage = h - top - 1
+    local selected = 1
+    local scroll = 0
 
+    while true do
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
         term.clear()
         centerText(1, "PLAYLIST", colors.lime)
         if #playlist == 0 then
-            centerText(top, "(empty -- add songs from Music Player)", colors.gray)
+            centerText(top, "(empty -- add from Music Player)", colors.gray)
         else
-            for i = 1, math.min(perPage, #playlist) do
-                local song = playlist[i]
+            if selected > #playlist then selected = #playlist end
+            if selected < scroll + 1 then scroll = selected - 1 end
+            if selected > scroll + perPage then scroll = selected - perPage end
+            for i = 1, math.min(perPage, #playlist - scroll) do
+                local idx = scroll + i
+                local song = playlist[idx]
                 term.setCursorPos(1, top + i - 1)
-                term.setBackgroundColor(colors.black)
-                term.setTextColor(colors.white)
+                if idx == selected then
+                    term.setBackgroundColor(colors.gray)
+                    term.setTextColor(colors.lime)
+                else
+                    term.setBackgroundColor(colors.black)
+                    term.setTextColor(colors.white)
+                end
                 term.clearLine()
-                term.write((" %d. %s"):format(i, song.name):sub(1, w))
+                term.write((" " .. song.name):sub(1, w))
             end
         end
         term.setBackgroundColor(colors.black)
         term.setTextColor(colors.lightGray)
-        term.setCursorPos(1, h - 1)
-        term.clearLine()
-        term.write("Press a number to remove that song")
         term.setCursorPos(1, h)
         term.clearLine()
-        term.write("P=play all  Q=back")
+        term.write(("Enter=remove P=play all Q=back"):sub(1, w))
 
         local event, key = os.pullEvent("key")
-        if key == keys.p and #playlist > 0 then
+        if key == keys.up then
+            selected = math.max(1, selected - 1)
+        elseif key == keys.down then
+            selected = math.min(#playlist, selected + 1)
+        elseif key == keys.enter and #playlist > 0 then
+            local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", playlist[selected].name)
+            if ok then playlist = newPlaylist or playlist
+            else flash("Rejected: " .. tostring(reason), false) end
+        elseif key == keys.p and #playlist > 0 then
             local ok, reason, status = send(brainId, "play_playlist")
             if ok then
                 transportScreen(brainId, "music", (status and status.name) or "Playlist", status)
@@ -258,15 +280,6 @@ local function playlistScreen(brainId, playlist)
             end
         elseif key == keys.q then
             return
-        elseif key >= keys.one and key <= keys.nine then
-            -- keys.one..keys.nine are consecutive in CC:Tweaked's keys
-            -- table, hence the arithmetic instead of 9 separate branches.
-            local digit = key - keys.one + 1
-            if playlist[digit] then
-                local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", playlist[digit].name)
-                if ok then playlist = newPlaylist or playlist
-                else flash("Rejected: " .. tostring(reason), false) end
-            end
         end
     end
 end
