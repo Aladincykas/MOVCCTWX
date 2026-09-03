@@ -180,21 +180,32 @@ local function transportScreen(brainId, kind, name, initialStatus)
     local status = initialStatus
     local nameLabel, statusLabel, playPauseBtn
 
+    -- Centers a label horizontally at row y, given its CURRENT text --
+    -- called both at setup and every updateLabels() (the status line's
+    -- text/length changes every poll, so it has to recenter every time,
+    -- not just once).
+    local function centerLabel(label, y, text)
+        text = text:sub(1, w)
+        label:setText(text)
+        label:setPosition(math.max(1, math.floor((w - #text) / 2) + 1), y)
+    end
+
     local function updateLabels()
+        centerLabel(nameLabel, 3, name)
         if status and status.screen == kind then
-            statusLabel:setText(((status.paused and "|| " or "> ") .. formatTime(status.elapsedSec)
-                .. "  " .. (status.volumePct or 0) .. "%"):sub(1, w))
+            centerLabel(statusLabel, 4, (status.paused and "|| " or "> ") .. formatTime(status.elapsedSec)
+                .. "  " .. (status.volumePct or 0) .. "%")
             playPauseBtn:setText(status.paused and "Play" or "Pause")
         else
-            statusLabel:setText("(connecting...)")
+            centerLabel(statusLabel, 4, "(connecting...)")
         end
     end
 
     clearFrameChildren(frame)
     frame:addLabel():setText((kind == "video" and "DIDZIULIS EKRANAS" or "MUSIC"):sub(1, w))
         :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
-    nameLabel = frame:addLabel():setText(name:sub(1, w)):setPosition(1, 3):setForeground(colors.white):setBackground(colors.black)
-    statusLabel = frame:addLabel():setPosition(1, 4):setForeground(colors.lightGray):setBackground(colors.black)
+    nameLabel = frame:addLabel():setForeground(colors.white):setBackground(colors.black)
+    statusLabel = frame:addLabel():setForeground(colors.lightGray):setBackground(colors.black)
 
     local btnW = math.max(4, math.floor((w - 4) / 2))
     playPauseBtn = frame:addButton():setText("--"):setPosition(1, 6):setSize(btnW, 1)
@@ -336,7 +347,10 @@ while true do
     frame:addButton():setText("Playlist"):setPosition(bx, 8):setSize(buttonW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
         :onClick(function() chosen = "playlist" basalt.stop() end)
-    frame:addButton():setText("Quit"):setPosition(bx, 10):setSize(buttonW, 1)
+    frame:addButton():setText("Now Playing"):setPosition(bx, 10):setSize(buttonW, 1)
+        :setBackground(colors.gray):setForeground(colors.lime)
+        :onClick(function() chosen = "nowplaying" basalt.stop() end)
+    frame:addButton():setText("Quit"):setPosition(bx, 12):setSize(buttonW, 1)
         :setBackground(colors.red):setForeground(colors.white)
         :onClick(function() chosen = "quit" basalt.stop() end)
 
@@ -366,6 +380,22 @@ while true do
         local ok, reason, _, playlist = send(brainId, "get_status")
         if ok then playlistScreen(brainId, playlist or {})
         else flash("Rejected: " .. tostring(reason), false) end
+    elseif chosen == "nowplaying" then
+        -- Checks what's ACTUALLY playing right now (could've been started
+        -- from the computer itself, or a while ago from this same pocket)
+        -- instead of only ever being reachable right after picking
+        -- something -- status.screen is "video"/"music" only while
+        -- something's actually playing; "menu"/"video_menu"/"music_menu"
+        -- otherwise (see startup.lua/musicplayer.lua/videoplayer.lua on
+        -- the brain for where each of those gets set).
+        local ok, reason, status = send(brainId, "get_status")
+        if not ok then
+            flash("Rejected: " .. tostring(reason), false)
+        elseif status and (status.screen == "video" or status.screen == "music") then
+            transportScreen(brainId, status.screen, status.name or "?", status)
+        else
+            flash("Nothing playing right now", false)
+        end
     elseif chosen == "quit" then
         break
     end
