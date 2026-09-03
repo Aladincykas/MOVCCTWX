@@ -670,6 +670,13 @@ function M.run(mon, speakers, config, frame, startSongName, wall, startWithPlayl
         -- shown again.
 
         basalt.run()
+        -- Reset here, not left to whoever called playSong() -- covers
+        -- every call site (library, playlist auto-advance, a remote
+        -- "play this song" direct-entry) in one place, so "Now Playing"
+        -- can never show a frozen, already-finished song just because
+        -- you're back on a selection screen instead of having left Music
+        -- entirely (that's the only other place this got reset before).
+        _G.MOVCCTWX_STATUS = { screen = "music_menu" }
         return playReason
     end
 
