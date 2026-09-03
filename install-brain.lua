@@ -35,7 +35,46 @@ local FILES = {
     "/vendor/32vid-decode.lua",
 }
 
-local BASE_URL = ("https://raw.githubusercontent.com/%s/%s/%s/brain/"):format(GITHUB_USER, REPO, BRANCH)
+-- Resolves the branch to the exact commit it currently points at, and
+-- downloads everything from THAT commit's URLs rather than the branch's.
+--
+-- This is not belt-and-braces, it is the only thing that works. GitHub's
+-- raw CDN caches for five minutes and does NOT include the query string in
+-- its cache key -- so the "?t=<timestamp>" trick this installer used, and
+-- the "?nocache=N" people add by hand, bust nothing at all. Verified
+-- directly: a request with a fresh random query still came back
+-- "X-Cache: HIT" with the previous version's byte count, while the API
+-- reported the new size. That is the whole explanation for a long run of
+-- "I reinstalled and it is still the old code".
+--
+-- A commit-pinned URL is a different path per commit, so it can never
+-- serve a stale copy. The API call itself is not CDN-cached this way.
+local function resolveCommit()
+    local response = http.get(
+        ("https://api.github.com/repos/%s/%s/commits/%s"):format(GITHUB_USER, REPO, BRANCH),
+        { Accept = "application/vnd.github.sha" })
+    if not response then return nil end
+    local sha = response.readAll()
+    response.close()
+    if type(sha) ~= "string" then return nil end
+    sha = sha:gsub("%s", "")
+    if #sha < 7 then return nil end
+    return sha
+end
+
+local COMMIT = resolveCommit()
+if COMMIT then
+    print("Installing from commit " .. COMMIT:sub(1, 7))
+else
+    -- Falling back to the branch means the CDN may hand back something up to
+    -- five minutes old. Said out loud, because silently installing stale code
+    -- is exactly the failure this is here to prevent.
+    print("WARNING: could not resolve the commit -- falling back to the")
+    print("branch, which may serve a cached copy up to 5 minutes old.")
+end
+local REF = COMMIT or BRANCH
+
+local BASE_URL = ("https://raw.githubusercontent.com/%s/%s/%s/brain/"):format(GITHUB_USER, REPO, REF)
 
 local function download(url, destPath)
     -- Deletes the old file first, THEN writes the new one, instead of
@@ -45,7 +84,7 @@ local function download(url, destPath)
     -- surviving an install, full stop -- delete-then-recreate can't
     -- leave anything old behind, whatever the cause of a report was.
     if fs.exists(destPath) then fs.delete(destPath) end
-    local response, err = http.get(url .. "?t=" .. tostring(os.epoch("utc")))
+    local response, err = http.get(url)
     if not response then
         error(("Failed to download %s: %s"):format(url, tostring(err)))
     end
