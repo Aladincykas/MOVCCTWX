@@ -96,15 +96,26 @@ local function newWaveStyle()
     }
 end
 
--- ==== plasma -- classic "flowing color blob" effect: four sine waves at
+-- ==== plasma -- classic "flowing color blob" effect: sine waves at
 -- different frequencies/axes/speeds, summed and normalized to pick a
 -- color band per cell. freqs/speeds are deliberately incommensurate (no
 -- shared small ratio between them) so the combined pattern doesn't repeat
 -- on any short, obviously-noticeable cycle -- it keeps drifting/warping
--- instead of looping. Standard cheap-plasma technique (any old
--- demoscene/screensaver plasma effect uses this same trick), not anything
--- CC-specific. 3 variants below (different freqs/speeds) for visual
--- variety -- same formula, different "personality".
+-- instead of looping. 3 variants below (different freqs/speeds) for
+-- visual variety -- same formula, different "personality".
+--
+-- The naive version of this calls math.sin/sqrt 3-4 times per CELL --
+-- tens of thousands of trig calls per frame on a wide wall, run every
+-- ~0.15s on CC's single Lua thread, competing directly with the audio
+-- coroutine for CPU time between yields. Confirmed in-game as audible
+-- stutter. This version calls sin/cos only once per ROW and once per
+-- COLUMN (not per cell), then combines those cheaply (plain multiply/add,
+-- no trig) for each individual cell -- the standard angle-addition trick
+-- (sin(a+b) = sin(a)cos(b) + cos(a)sin(b)) turns an O(rows*cols) trig
+-- workload into O(rows+cols). The 4th term (radial distance from center)
+-- doesn't factor this way -- distance isn't a linear combination of x and
+-- y -- so it's dropped rather than paid for at the old cost; 3 terms
+-- still reads as genuine flowing plasma, just marginally less busy.
 local function newPlasmaStyle(freqs, speeds)
     local t
     return {
@@ -113,13 +124,24 @@ local function newPlasmaStyle(freqs, speeds)
             if not paused then t = t + 0.12 end
         end,
         draw = function(wall, cols, rows)
+            local xSin, diagSinX, diagCosX = {}, {}, {}
+            for c = 1, cols do
+                local x = c / cols
+                xSin[c] = math.sin(x * freqs[1] + t * speeds[1])
+                local a = x * freqs[3] + t * speeds[3]
+                diagSinX[c], diagCosX[c] = math.sin(a), math.cos(a)
+            end
+            local ySin, diagSinY, diagCosY = {}, {}, {}
+            for r = 1, rows do
+                local y = r / rows
+                ySin[r] = math.sin(y * freqs[2] - t * speeds[2])
+                local b = y * freqs[3]
+                diagSinY[r], diagCosY[r] = math.sin(b), math.cos(b)
+            end
             blitFrame(wall, cols, rows, function(r, c)
-                local x, y = c / cols, r / rows
-                local v = math.sin(x * freqs[1] + t * speeds[1])
-                    + math.sin(y * freqs[2] - t * speeds[2])
-                    + math.sin((x + y) * freqs[3] + t * speeds[3])
-                    + math.sin(math.sqrt((x - 0.5) ^ 2 + (y - 0.5) ^ 2) * freqs[4] - t * speeds[4])
-                return bandColor(math.max(0, math.min(1, (v + 4) / 8)))
+                local diag = diagSinX[c] * diagCosY[r] + diagCosX[c] * diagSinY[r]
+                local v = xSin[c] + ySin[r] + diag
+                return bandColor(math.max(0, math.min(1, (v + 3) / 6)))
             end)
         end,
     }
