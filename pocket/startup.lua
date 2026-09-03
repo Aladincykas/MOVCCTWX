@@ -216,7 +216,11 @@ local function transportScreen(brainId, kind, name, initialStatus)
         end)
     frame:addButton():setText("Stop"):setPosition(2 + btnW, 6):setSize(btnW, 1)
         :setBackground(colors.red):setForeground(colors.white)
-        :onClick(function() send(brainId, "stop") basalt.stop() end)
+        :onClick(function()
+            local ok, reason = send(brainId, "stop")
+            if not ok then flash("Rejected: " .. tostring(reason), false) end
+            basalt.stop()
+        end)
 
     frame:addButton():setText("Vol -"):setPosition(1, 8):setSize(btnW, 1)
         :setBackground(colors.gray):setForeground(colors.lime)
@@ -261,35 +265,55 @@ end
 -- got us here) -- refetched after every remove so this stays accurate.
 local function playlistScreen(brainId, playlist)
     local contentTop = 3
+    -- 2 footer rows now, not 1 -- Prev/Next above, Play All/Back below --
+    -- a playlist longer than one screenful used to just silently hide the
+    -- extra songs with no way to see or remove them at all (confirmed:
+    -- no pagination existed here, unlike every other list screen).
+    local navRow = h - 1
     local footerRow = h
+    local perPage = math.max(1, navRow - contentTop)
+    local page = 1
 
     local function draw()
         clearFrameChildren(frame)
-        frame:addLabel():setText("PLAYLIST"):setSize(w, 1):setPosition(1, 1)
-            :setForeground(colors.lime):setBackground(colors.gray)
+        local totalPages = math.max(1, math.ceil(#playlist / perPage))
+        if page > totalPages then page = totalPages end
+        frame:addLabel():setText(("PLAYLIST -- pg %d/%d"):format(page, totalPages):sub(1, w))
+            :setSize(w, 1):setPosition(1, 1):setForeground(colors.lime):setBackground(colors.gray)
 
         if #playlist == 0 then
             frame:addLabel():setText("(empty)"):setPosition(1, contentTop):setForeground(colors.gray):setBackground(colors.black)
             frame:addLabel():setText("Add from Music Player"):setPosition(1, contentTop + 1):setForeground(colors.gray):setBackground(colors.black)
         else
             local removeW = 3
-            local perPage = math.max(1, footerRow - contentTop)
-            for i = 1, math.min(perPage, #playlist) do
-                local song = playlist[i]
-                local rowY = contentTop + i - 1
-                frame:addLabel()
-                    :setText(song.name:sub(1, w - removeW - 1))
-                    :setPosition(1, rowY):setSize(w - removeW, 1)
-                    :setForeground(colors.white):setBackground(colors.black)
-                frame:addButton():setText("X"):setPosition(w - removeW + 1, rowY):setSize(removeW, 1)
-                    :setBackground(colors.red):setForeground(colors.white)
-                    :onClick(function()
-                        local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", song.name)
-                        if ok then playlist = newPlaylist or playlist draw()
-                        else flash("Rejected: " .. tostring(reason), false) draw() end
-                    end)
+            local startIdx = (page - 1) * perPage + 1
+            for i = 0, perPage - 1 do
+                local idx = startIdx + i
+                local song = playlist[idx]
+                if song then
+                    local rowY = contentTop + i
+                    frame:addLabel()
+                        :setText(song.name:sub(1, w - removeW - 1))
+                        :setPosition(1, rowY):setSize(w - removeW, 1)
+                        :setForeground(colors.white):setBackground(colors.black)
+                    frame:addButton():setText("X"):setPosition(w - removeW + 1, rowY):setSize(removeW, 1)
+                        :setBackground(colors.red):setForeground(colors.white)
+                        :onClick(function()
+                            local ok, reason, _, newPlaylist = send(brainId, "playlist_remove", song.name)
+                            if ok then playlist = newPlaylist or playlist draw()
+                            else flash("Rejected: " .. tostring(reason), false) draw() end
+                        end)
+                end
             end
         end
+
+        local navW = math.max(4, math.floor((w - 6) / 3))
+        frame:addButton():setText("<"):setPosition(1, navRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if page > 1 then page = page - 1 end draw() end)
+        frame:addButton():setText(">"):setPosition(2 + navW, navRow):setSize(navW, 1)
+            :setBackground(colors.gray):setForeground(colors.lime)
+            :onClick(function() if page < totalPages then page = page + 1 end draw() end)
 
         local halfW = math.max(4, math.floor((w - 2) / 2))
         frame:addButton():setText("Play All"):setPosition(1, footerRow):setSize(halfW, 1)
