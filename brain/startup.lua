@@ -3,9 +3,11 @@
 -- Music player. No idle timeouts, no background matrix/menu music, no
 -- multi-screen state machine -- pick a screen, use it, go back.
 --
--- The monitor wall (wall.lua) is only opened lazily, right before the
--- first video plays, so picking Music never has to find/validate all 12
--- wall monitors at all.
+-- The monitor wall (wall.lua) is opened lazily, the first time it's
+-- actually needed -- by either Video or Music now, since both show their
+-- full-screen visuals on the wall (see videoplayer.lua and
+-- musicplayer.lua) and keep only text/controls on the computer's own
+-- screen.
 --
 -- remote.lua's rednet listener runs the whole time, in parallel with
 -- whatever's on screen, so the pocket computer can control this computer
@@ -254,7 +256,7 @@ local function mainLoop()
         elseif screen == "music" then
             clearFrameChildren(frame)
             local musicplayer = require("musicplayer")
-            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName)
+            local exitReason = musicplayer.run(term, speakers, config, frame, pendingSongName, getWall())
             pendingSongName = nil
             screen = (exitReason == "quit") and "quit" or "menu"
         elseif screen == "quit" or _G.MOVCCTWX_TERMINATED then
