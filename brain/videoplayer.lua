@@ -237,7 +237,7 @@ function M.play(wall, screen, speakers, entry, config, opts)
             if #cues > 0 then
                 subtitleCursor = subtitleModule.newCursor(cues)
                 local wallW, wallH = wall.getSize()
-                subtitleScale = subtitleModule.scaleFor(wallW, wallH)
+                subtitleScale = subtitleModule.scaleFor(wallW, wallH, config.SUBTITLE_SCALE)
             end
         end)
         -- A missing or malformed subtitle file must never stop the film. This
@@ -356,7 +356,20 @@ function M.play(wall, screen, speakers, entry, config, opts)
     local function streamAudio()
         if not hasSeparateAudio then return end
         local dfpwm = require("cc.audio.dfpwm")
-        local BLOCK = 16 * 1024
+        -- 4KB, not the 16KB musicplayer.lua uses. The music player has the
+        -- computer to itself; here audio shares it with a video decoder that
+        -- already needs most of every frame, and a block is decoded in one
+        -- piece with no chance to yield in the middle.
+        --
+        -- Measured in CraftOS-PC on DXR S1E1's real audio: one 16KB block took
+        -- 90ms in a single burst -- nearly two whole frames at 20fps with
+        -- nothing drawn -- recurring every 2.7 seconds, which is exactly a
+        -- stutter. Four 4KB blocks took 11.5ms each, 46ms in total: shorter
+        -- bursts AND half the overall work, because the decoder's output table
+        -- never has to grow to 131,000 entries in one go. The sound itself is
+        -- unchanged: the DFPWM decoder carries its state from block to block,
+        -- so splitting the stream yields exactly the same samples.
+        local BLOCK = 4 * 1024
 
         -- posSec is the position in the soundtrack that has actually been
         -- HEARD, and it only moves while sound is coming out. Audio plays at

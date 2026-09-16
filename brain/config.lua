@@ -91,6 +91,12 @@ return {
     -- subtitle file is unaffected by this.
     SUBTITLES = true,
 
+    -- How large subtitles are drawn. 2 = glyphs ten rows tall, 1 = five rows
+    -- (the first size, smaller). Whole numbers only: the letters are built out
+    -- of whole character cells, so anything in between would make some
+    -- strokes thicker than others.
+    SUBTITLE_SCALE = 2,
+
     MENU_MUSIC_VOLUME = 0.5,
     MENU_MUSIC_NAME = nil,
 

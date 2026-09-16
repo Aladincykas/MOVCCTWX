@@ -17,8 +17,14 @@
 -- (init/read below) instead of the older Huffman-tree approach -- this is
 -- the actually-correct decoder for what this sanjuuni build outputs, and
 -- is ported here as faithfully as possible. Do not "clean up" the ANS
--- table-construction math by hand; there's no independent way to verify
--- correctness of a change to it outside a real CC:Tweaked runtime.
+-- table-construction math by hand.
+--
+-- The storage and the hot loops HAVE since been optimised (lookup tables,
+-- parallel arrays, inlined bit reads, reused row buffers), and that change was
+-- verified the only way a decoder change can be: every frame of three real
+-- DXR S1E1 chunks decoded in CraftOS-PC by both versions and compared byte for
+-- byte -- rows, colours and palette. Any further change to this file needs the
+-- same check before it ships.
 --
 -- STREAMING, NOT BATCH: this was previously rewritten to collect every
 -- decoded video frame and audio chunk into video[]/audio[] arrays and
@@ -45,6 +51,25 @@ local function log2(n) local _, r = math_frexp(n) return r - 1 end
 local dfpwm = require("cc.audio.dfpwm")
 
 local blitColors = { [0] = "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f" }
+
+-- Lookup tables for the per-symbol and per-cell hot paths.
+--
+-- A 324x120 frame is about 116,000 ANS symbols and 38,880 cells, and every one
+-- of them used to pay for work whose answer never changes: `2 ^ n - 1` to build
+-- a bit mask (a floating-point power, per symbol), and `string.char(128 + v)`
+-- to build a drawing character that can only ever be one of 32 values. Both
+-- are now looked up. Measured in CraftOS-PC on a real DXR S1E1 chunk, with the
+-- decoded output checked byte-for-byte against the unoptimised version.
+local MASK, POW2 = {}, {}
+for n = 0, 32 do
+    POW2[n] = 2 ^ n
+    MASK[n] = 2 ^ n - 1
+end
+-- Out-of-range values fall through to string.char itself, so anything that
+-- would have errored before still errors in exactly the same way.
+local CHAR = setmetatable({}, { __index = function(_, v) return string.char(128 + v) end })
+for v = 0, 127 do CHAR[v] = string.char(128 + v) end
+local concat = table.concat
 
 local M = {}
 
@@ -90,21 +115,32 @@ function M.decode(file, handlers)
     end
 
     local init, read
-    local decodingTable, X, readbits, isColor
+    -- The decoding table is held as three parallel arrays (symbol, bit count,
+    -- next-state base) instead of one small table per state. A table of 2^R
+    -- entries was rebuilt for every init, which is twice per frame -- thousands
+    -- of short-lived tables a frame for the garbage collector, on the same
+    -- thread that draws. The construction math below is unchanged; only where
+    -- its results are kept.
+    --
+    -- The bitstream state (partial/bits) lives here too, rather than inside a
+    -- per-init readbits closure, so read() can pull bits inline instead of
+    -- making a function call for every one of the ~116,000 symbols a frame.
+    local decS, decN, decX, constantSymbol
+    local X, isColor
+    local partial, bits = 0, 0
     function init(c)
         isColor = c
         local R = file.read()
         local L = 2 ^ R
         local Ls = readDict(c and 24 or 32)
         if R == 0 then
-            decodingTable = file.read()
+            constantSymbol = file.read()
             X = nil
             return
         end
         local a = 0
         for i = 0, #Ls do Ls[i] = Ls[i] == 0 and 0 or 2 ^ (Ls[i] - 1) a = a + Ls[i] end
         assert(a == L, a)
-        decodingTable = { R = R }
         local x, step, next_, symbol = 0, 0.625 * L + 3, {}, {}
         for i = 0, #Ls do
             next_[i] = Ls[i]
@@ -113,41 +149,57 @@ function M.decode(file, handlers)
                 x, symbol[x] = (x + step) % L, i
             end
         end
+        local tS, tN, tX = {}, {}, {}
         for x2 = 0, L - 1 do
             local s = symbol[x2]
-            local t = { s = s, n = R - log2(next_[s]) }
-            t.X, decodingTable[x2], next_[s] = bit32_lshift(next_[s], t.n) - L, t, 1 + next_[s]
+            local n = R - log2(next_[s])
+            -- Same simultaneous update as before: both the next-state base and
+            -- the increment use the value of next_[s] from BEFORE this entry.
+            tS[x2], tN[x2], tX[x2], next_[s] = s, n, bit32_lshift(next_[s], n) - L, 1 + next_[s]
         end
-        local partial, bits, pos = 0, 0, 1
-        function readbits(n)
-            if not n then n = bits % 8 end
-            if n == 0 then return 0 end
-            while bits < n do pos, bits, partial = pos + 1, bits + 8, bit32_lshift(partial, 8) + file.read() end
-            local retval = bit32_band(bit32_rshift(partial, bits - n), 2 ^ n - 1)
-            bits = bits - n
-            return retval
-        end
-        X = readbits(R)
+        decS, decN, decX = tS, tN, tX
+
+        -- A fresh bitstream for this init, then the initial state: what
+        -- readbits(R) used to do. R is never 0 here.
+        partial, bits = 0, 0
+        while bits < R do bits, partial = bits + 8, bit32_lshift(partial, 8) + file.read() end
+        X = bit32_band(bit32_rshift(partial, bits - R), MASK[R])
+        bits = bits - R
     end
     function read(nsym)
         local retval = {}
         if X == nil then
-            for i = 1, nsym do retval[i] = decodingTable end
+            local v = constantSymbol
+            for i = 1, nsym do retval[i] = v end
             return retval
         end
-        local i = 1
-        local last = 0
+        -- Everything the loop touches, as locals: upvalue and global lookups
+        -- cost more than locals, and this loop runs ~116,000 times a frame.
+        local S, N, XT, mask, pow2 = decS, decN, decX, MASK, POW2
+        local band, rshift, lshift, readByte = bit32_band, bit32_rshift, bit32_lshift, file.read
+        local color = isColor
+        local x, p, b = X, partial, bits
+        local i, last = 1, 0
         while i <= nsym do
-            local t = decodingTable[X]
-            if isColor and t.s >= 16 then
-                local l = 2 ^ (t.s - 15)
+            local s = S[x]
+            if color and s >= 16 then
+                local l = pow2[s - 15]
                 for n = 0, l - 1 do retval[i + n] = last end
                 i = i + l
             else
-                retval[i], last, i = t.s, t.s, i + 1
+                retval[i], last, i = s, s, i + 1
             end
-            X = t.X + readbits(t.n)
+            -- readbits(N[x]), inlined.
+            local n = N[x]
+            local v = 0
+            if n ~= 0 then
+                while b < n do b, p = b + 8, lshift(p, 8) + readByte() end
+                v = band(rshift(p, b - n), mask[n])
+                b = b - n
+            end
+            x = XT[x] + v
         end
+        X, partial, bits = x, p, b
         return retval
     end
 
@@ -171,14 +223,19 @@ function M.decode(file, handlers)
             local fg = read(width * height)
 
             local frame = { palette = {} }
-            for y = 0, height - 1 do
-                local text, fgs, bgs = {}, {}, {}
+            -- The three row buffers are reused for every row: each row writes
+            -- all `width` entries before it is joined, so nothing from the
+            -- previous row can leak into the next.
+            local text, fgs, bgs = {}, {}, {}
+            local idx = 0
+            for y = 1, height do
                 for x = 1, width do
-                    text[x] = string.char(128 + screen[y * width + x])
-                    fgs[x] = blitColors[fg[y * width + x]]
-                    bgs[x] = blitColors[bg[y * width + x]]
+                    idx = idx + 1
+                    text[x] = CHAR[screen[idx]]
+                    fgs[x] = blitColors[fg[idx]]
+                    bgs[x] = blitColors[bg[idx]]
                 end
-                frame[y + 1] = { table.concat(text), table.concat(fgs), table.concat(bgs) }
+                frame[y] = { concat(text, "", 1, width), concat(fgs, "", 1, width), concat(bgs, "", 1, width) }
             end
             for n = 1, 16 do
                 frame.palette[n] = { file.read() / 255, file.read() / 255, file.read() / 255 }

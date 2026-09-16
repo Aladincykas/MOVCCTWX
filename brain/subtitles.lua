@@ -8,9 +8,11 @@
 -- resolution (648x360 pixels) text has to be about a third of the frame tall
 -- before it survives sanjuuni's downscale and its dither to 16 colours, and
 -- even then the strokes come out soft and speckled. Drawing them here instead
--- costs two text rows out of 120, stays perfectly crisp whatever the scene
--- behind it looks like, can be switched off while the video plays, and adds
--- roughly 50KB to an entire film instead of inflating every single chunk.
+-- stays perfectly crisp whatever the scene behind it looks like, can be
+-- switched off while the video plays, and adds roughly 30KB to an entire
+-- episode instead of inflating every single chunk. Measured in CraftOS-PC on
+-- real DXR S1E1 frames, compositing costs a few percent of the draw step,
+-- which is itself a small fraction of decoding.
 --
 -- The catch is that the wall is 324 characters wide, so one line of ordinary
 -- monitor text would be about a sixth the height a cinema subtitle should be.
@@ -93,7 +95,7 @@ local GLYPHS = {
 }
 
 local GLYPH_W, GLYPH_H = 3, 5
--- One blank column between glyphs, scaled with them.
+-- One blank column between glyphs. It does NOT grow with the scale; see layout.
 local ADVANCE = GLYPH_W + 1
 
 -- ---------------------------------------------------------------- parsing
@@ -212,8 +214,15 @@ local MAX_LINES = 4
 -- so on the 120-row wall scale 1 puts a two-line subtitle at about 9% of the
 -- height -- close to what a cinema subtitle occupies. Scale 2 would be 18%,
 -- which is too much of the picture to cover.
-function M.scaleFor(wallW, wallH)
-    return math.max(1, math.floor(math.min(wallW / 320, wallH / 110)))
+--
+-- The wall gets scale 2 by default: glyphs ten rows tall. Scale 1 (five rows)
+-- was the first version and read fine, but looked small from across the room.
+-- config.SUBTITLE_SCALE overrides it; 1 puts the original size back.
+function M.scaleFor(wallW, wallH, override)
+    if type(override) == "number" and override >= 1 then
+        return math.floor(override)
+    end
+    return math.max(1, math.floor(math.min(wallW / 160, wallH / 55)))
 end
 
 -- Builds the drawable form of a cue: a list of rows, each a run of cells to
@@ -228,15 +237,21 @@ function M.layout(cue, wallW, wallH, scale, marginBottom)
 
     local glyphW = GLYPH_W * scale
     local glyphH = GLYPH_H * scale
-    local advance = ADVANCE * scale
+    -- One blank column between letters at every scale, rather than a gap that
+    -- grows with the glyphs. At scale 2 a scaled gap would be two columns, and
+    -- that alone costs a sixth of the characters that fit on a line.
+    local letterGap = ADVANCE - GLYPH_W
+    local advance = glyphW + letterGap
     local padX = 2 * scale
     local padY = scale
     local lineGap = scale
 
-    -- Leave room for the padding on both sides, and never let a line run the
-    -- full width of the wall -- text spanning all twelve monitors is harder
-    -- to read than the same text spanning the middle six.
-    local maxChars = math.max(8, math.floor((wallW * 0.66 - 2 * padX + scale) / advance))
+    -- Up to 90% of the wall's width. At 66%, which suited scale 1, doubled
+    -- glyphs left room for only 29 characters, and measured against DXR S1E1's
+    -- real subtitles 29% of lines would then have wrapped -- two-line
+    -- subtitles turning into four-line boxes. At 90% it is about 40
+    -- characters, and only 3% of lines wrap.
+    local maxChars = math.max(8, math.floor((wallW * 0.9 - 2 * padX + letterGap) / advance))
 
     local lines = {}
     for _, raw in ipairs(cue.lines) do
@@ -255,7 +270,7 @@ function M.layout(cue, wallW, wallH, scale, marginBottom)
 
     local widest = 0
     for _, line in ipairs(lines) do
-        local w = #line * advance - scale
+        local w = #line * advance - letterGap
         if w > widest then widest = w end
     end
 
@@ -275,7 +290,7 @@ function M.layout(cue, wallW, wallH, scale, marginBottom)
     end
 
     for lineIndex, line in ipairs(lines) do
-        local lineW = #line * advance - scale
+        local lineW = #line * advance - letterGap
         local originX = math.floor((boxW - lineW) / 2) + 1
         local originY = padY + (lineIndex - 1) * (glyphH + lineGap) + 1
         for i = 1, #line do
