@@ -109,8 +109,21 @@ local ADVANCE = GLYPH_W + 1
 function M.parse(text)
     local cues = {}
     for line in text:gmatch("[^\r\n]+") do
+        -- Each field is matched TOGETHER with the tab that ends it, after one
+        -- is appended so the last field has a tab too.
+        --
+        -- This used to be gmatch("[^\t]*"), and that is a pattern that can
+        -- match the empty string -- which Lua versions disagree about.
+        -- ComputerCraft's VM (Cobalt) follows the older rules and yields an
+        -- extra "" at every tab, so "39990\t42080\ttext" came out as 39990,
+        -- "", 42080, "", text. The end time landed in the wrong slot, read as
+        -- nil, and EVERY cue failed the check below -- so subtitles silently
+        -- never appeared, with no error anywhere. It passed testing only
+        -- because the test VM follows the newer rules and yields no empties.
+        -- Consuming the tab makes every match non-empty, which reads the same
+        -- on every version, and still keeps a genuinely empty field.
         local fields = {}
-        for field in line:gmatch("[^\t]*") do fields[#fields + 1] = field end
+        for field in (line .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = field end
         local startMs = tonumber(fields[1])
         local endMs = tonumber(fields[2])
         if startMs and endMs then
